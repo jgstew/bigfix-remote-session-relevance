@@ -296,7 +296,8 @@ def test_basic_plus_mtls_is_allowed(tmp_path: Path) -> None:
     )
     (a,) = load_config(_write(tmp_path / "c.toml", text)).connections
     assert a.auth == "basic"
-    assert a.client_cert == "/c.pem"
+    # Paths are normalized with pathlib, so Windows spells this "\\c.pem".
+    assert a.client_cert == str(Path("/c.pem"))
 
 
 @pytest.mark.parametrize(
