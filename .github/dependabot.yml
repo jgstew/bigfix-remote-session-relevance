@@ -1,0 +1,46 @@
+# Dependency-update alerts, closing the "no automated vulnerability alerting
+# path" gap in docs/security-review.md.
+#
+# Requires Dependabot to be enabled on the GHES instance - this file is inert,
+# not an error, if it is not. Check Security > Dependabot settings.
+#
+# The 7-day cooldown is the point, not a courtesy: a release published minutes
+# ago is the likeliest to be a compromised one. It matches `exclude-newer` in
+# pyproject.toml and is zizmor's minimum.
+version: 2
+updates:
+  # "uv", not "pip": uv.lock is what the release wheel is built from
+  # (uv sync --locked), and "pip" would read pyproject.toml without updating
+  # the lock. Fall back to "pip" if this instance rejects the newer ecosystem.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+
+  # Scans .pre-commit-config.yaml and updates each hook's `rev:` (SHA-pinned
+  # revs get their version comment updated too, same as the github-actions
+  # entries above). No `cooldown` here: as of 2026-03, GitHub does not support
+  # the cooldown option for this ecosystem, so these PRs land without the
+  # 7-day delay the other two ecosystems get - review before merging.
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"

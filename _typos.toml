@@ -1,0 +1,3 @@
+[default.extend-words]
+# The certifi CA bundle package, not a misspelling of "certify".
+certifi = "certifi"

@@ -1,0 +1,290 @@
+---
+# run on only items staged in git:  pre-commit
+# automatically run on commit:      pre-commit install
+# check all files in repo:          pre-commit run --all-files
+# run the pre-push hooks by hand:   pre-commit run --all-files --hook-stage pre-push
+# check all files in repo:          pre-commit run --all-files --hook-stage manual
+# update all pre-commit hooks:      pre-commit autoupdate
+# https://github.com/pre-commit/pre-commit-hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-ast
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+        exclude: &captured (?x)( \.svg$ | ^tests/fixtures/[^/]+/captured/ )
+      # Captured server responses are byte-for-byte evidence of what a real
+      # server sent; "fixing" them would edit the record the parsers are
+      # tested against.
+      - id: trailing-whitespace
+        exclude: *captured
+      - id: mixed-line-ending
+        exclude: *captured
+      - id: detect-private-key
+      # Leftover breakpoint()/pdb.set_trace() in a commit.
+      - id: debug-statements
+      # Structural guards. None of these have anything to catch today - no
+      # submodules, symlinks or executable files are tracked - which is the
+      # point: they keep it that way rather than clean up a backlog.
+      - id: forbid-submodules
+      # check-symlinks is deliberately NOT here: it matches only `type:
+      # symlink` files, and with none tracked the meta `check-hooks-apply` hook
+      # below (correctly) rejects it as a hook that can never fire.
+      # destroyed-symlinks matches every file, so it applies regardless.
+      # check-illegal-windows-names is out for the same reason: it inspects
+      # only newly-added files, so it reports "no files to check" on a
+      # --all-files run and check-hooks-apply flags it.
+      - id: destroyed-symlinks
+      - id: check-shebang-scripts-are-executable
+      # DESIGN.md cites GitHub URLs throughout; a link to a branch rather than
+      # a commit rots silently.
+      - id: check-vcs-permalinks
+      # Every file under tests/ already follows test_*.py; this keeps a new one
+      # from being silently skipped by pytest's collection.
+      - id: name-tests-test
+        args: ["--pytest-test-first"]
+      # Block direct commits to the integration branches; work on a feature
+      # branch and open a PR instead. Bypass for a deliberate exception with
+      # `git commit --no-verify`.
+      # - id: no-commit-to-branch
+      #   args: ["--branch=main", "--branch=master"]
+
+  # Broader than `detect-private-key` above, which only matches PEM headers:
+  # this catches cloud keys, tokens and connection strings too.
+  # ~/.bigfix/.remote_session_connections.toml carries real credentials and
+  # lives outside the repo, so the realistic failure is one of its values
+  # arriving in a captured fixture rather than a PEM block. Deferred to pre-push rather
+  # than every commit - it scans the whole staged content, not just the
+  # diff. Clean on the tree today.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e # v8.30.1
+    hooks:
+      - id: gitleaks
+        stages: [pre-push, manual]
+
+  # ruff replaces black + flake8 + isort: `ruff-check` lints (and fixes),
+  # `ruff-format` is the formatter. Config lives in pyproject.toml.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: a56c0b927e6465d37cae3e97d35d4d18ab2b96cd # v0.16.9
+    hooks:
+      - id: ruff-check
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  # Security-focused AST linter for common Python mistakes (hardcoded
+  # passwords, shell=True, insecure deserialization, etc.). -lll restricts
+  # output to high-severity findings only, so it stays quiet on the low/medium
+  # noise (e.g. `assert` in tests) that would otherwise need per-file ignores.
+  - repo: https://github.com/PyCQA/bandit
+    rev: 92ae8b82fb422a639f0ed8d99e96cea769594e08 # 1.9.4
+    hooks:
+      - id: bandit
+        args: ["-r", "-lll"]
+        files: ^src/
+
+  # Enforces a few Python style rules slyp's author found error-prone in
+  # practice (e.g. no bare string-literal concatenation across lines).
+  - repo: https://github.com/sirosen/slyp
+    rev: 5eda35ad8f51f572b10523884f466df187335f74 # 0.10.3
+    hooks:
+      - id: slyp
+
+  # Scores the package's distribution metadata (README, classifiers, project
+  # URLs, etc.) against packaging best practices. Its own default hook is
+  # `always_run: true` on every commit; overridden here to fire only when a
+  # file that actually affects that metadata changes. No setup.py/setup.cfg
+  # in this repo (hatchling + pyproject.toml only).
+  - repo: https://github.com/regebro/pyroma
+    rev: dd478a67d029502036973a9f596ec4b2c0614bf7 # 5.0.1
+    hooks:
+      - id: pyroma
+        always_run: false
+        files: |
+          (?x)^(
+              README.md|
+              pyproject.toml|
+              src/bigfix_remote_session_relevance/__init__.py
+          )$
+        stages: [manual]
+
+  # False positives are whitelisted in _typos.toml rather than excluded by
+  # path, so real fixtures stay covered instead of silently skipped.
+  - repo: https://github.com/crate-ci/typos
+    rev: b859c0df7f391deba73030f79b957e62b4d81dc6 # varcon-core-v5.0.7
+    hooks:
+      - id: typos
+        exclude: *captured
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: 57b21406f092110c18776e39b0bda50d37c945c8 # v2.4.3
+    hooks:
+      - id: codespell
+        exclude: *captured
+
+  # Enforces .editorconfig itself, which until now nothing checked - notably
+  # the `end_of_line = crlf` rule for .bat/.cmd files. `mixed-line-ending`
+  # above only fires on a file that mixes both endings, so a wholly-LF one
+  # would have gone through. Config in .editorconfig-checker.json.
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: e8b4e28241a9ae8296ba6e4a491b5da4eda73283 # 3.11.1
+    hooks:
+      - id: editorconfig-checker
+        exclude: *captured
+
+  - repo: https://github.com/adrienverge/yamllint.git
+    rev: cba56bcde1fdd01c1deb3f945e69764c291a6530 # v1.38.0
+    hooks:
+      - id: yamllint
+        args: [-c=.yamllint.yaml]
+
+  - repo: https://github.com/asottile/pyupgrade
+    rev: 75992aaa40730136014f34227e0135f63fc951b4 # v3.21.2
+    hooks:
+      - id: pyupgrade
+        name: Upgrade Python syntax
+        args: [--py311-plus]
+        stages: [pre-push, manual]
+
+  - repo: https://github.com/pre-commit/pygrep-hooks
+    rev: 3a6eb0fadf60b3cccfd80bad9dbb6fae7e47b316 # v1.10.0
+    # Pure regex greps, milliseconds to run, so there is nothing to gain from
+    # deferring them: at `stages: [manual]` a developer only heard about a
+    # blanket `# type: ignore` once CI ran, which is the wrong end of the loop
+    # for a one-character fix.
+    hooks:
+      - id: python-check-blanket-noqa
+      - id: python-no-log-warn
+      - id: python-use-type-annotations
+      - id: python-no-eval
+      - id: python-check-blanket-type-ignore
+
+  - repo: https://github.com/abravalheri/validate-pyproject
+    rev: 17e12779811926f000bdfa1795f9e3735dd71ac3 # 0.26
+    hooks:
+      - id: validate-pyproject
+        stages: [manual]
+
+  - repo: https://github.com/python-jsonschema/check-jsonschema
+    rev: 0494aa7fa1314e98913a41227d8f0a515b2c1049 # 0.38.2
+    hooks:
+      - id: check-github-workflows
+        args: ["--verbose"]
+        stages: [manual]
+      - id: check-dependabot
+        stages: [manual]
+
+  # The third leg of the workflow-checking stool, and the one that was missing:
+  # check-github-workflows (above) validates the schema, zizmor (below) audits
+  # security, and neither looks at what the workflows actually *do* - the
+  # `${{ }}` expressions, the step/job references, the action input names, and
+  # the shell in `run:` blocks. Clean on the tree today.
+  #
+  # actionlint delegates `run:` block linting to shellcheck and silently skips
+  # it when shellcheck is not on PATH - so a developer without it still gets
+  # the expression and reference checks, while CI (GitHub runners ship
+  # shellcheck) gets the shell checks too. `brew install shellcheck` to get the
+  # full check locally.
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
+    hooks:
+      - id: actionlint
+        stages: [pre-push, manual]
+
+  - repo: https://github.com/woodruffw/zizmor-pre-commit
+    # Find security issues in GitHub Actions CI/CD setups.
+    rev: fa412071e4f5d44d44f9e365f4676f9df92456a2 # v1.30.1
+    hooks:
+      - id: zizmor
+        stages: [pre-push, manual]
+        # --no-progress is the hook's own default arg and has to be repeated:
+        # setting `args` replaces the list, it does not append to it.
+        # Online mode has no flag: zizmor runs offline unless it finds a token
+        # in GH_TOKEN / GITHUB_TOKEN / ZIZMOR_GITHUB_TOKEN, so export one
+        # (`export GH_TOKEN="$(gh auth token)"`) before running this hook
+        # locally to get the online-only audits.
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: fecaddcd0b0601a3c02f729ae7a110511d2b52a6 # 0.12.20
+    hooks:
+      - id: uv-lock
+      # uv-sync is a post-checkout/post-merge/post-rewrite hook, not a
+      # pre-commit one: it re-syncs .venv after a pull or branch switch. It only
+      # fires once those hook types are installed:
+      #     pre-commit install --hook-type post-checkout --hook-type post-merge
+      - id: uv-sync
+        args: ["--locked"]
+      # Known-vulnerability check against the lock file. `uv audit` is still
+      # experimental and needs the network, so it is manual-only rather than
+      # blocking every commit.
+      - id: uv-audit
+        stages: [manual]
+        args: ["--preview-features", "audit-command"]
+
+  # Mirrors of what a release run does, so lock drift or a broken build backend
+  # pin is caught before the release workflow hits it:
+  #     pre-commit run --hook-stage manual uv-lock-check uv-build-wheel
+  #
+  # These are `stages: [pre-push, manual]` - too slow to want on every `git
+  # commit`, but they should still gate code leaving the machine. `manual` has
+  # to stay in the list for CI to see them at all, and the pre-push half only
+  # fires once the hook type is installed:
+  #     pre-commit install --hook-type pre-push
+  - repo: local
+    hooks:
+      # `pre-commit/mirrors-mypy` runs mypy in its own isolated environment,
+      # which lacks this project's runtime deps (httpx, defusedxml, tomlkit,
+      # filelock) and, when given only the staged filenames,
+      # loses cross-module context and reports no-any-return/untyped-decorator
+      # errors that don't reproduce under a full-package run. Running it
+      # through `uv run` against the whole package instead uses this repo's
+      # real, dependency-complete venv and matches CI exactly (`uv run mypy
+      # src`, .github/workflows/test.yaml).
+      - id: mypy
+        name: mypy (uv run mypy src)
+        language: system
+        pass_filenames: false
+        files: ^src/
+        entry: uv run --frozen mypy src
+      - id: uv-lock-check
+        name: uv lock --check (uv.lock matches pyproject.toml)
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+        entry: uv lock --check
+      - id: uv-build-wheel
+        name: uv build --wheel (build backend pin works)
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+        # built into a temp dir so the repo's own dist/ is not created or stale-filled
+        entry: sh -c 'out="$(mktemp -d)"; trap "rm -rf \"$out\"" EXIT; uv build --wheel --out-dir "$out"'
+      - id: pyright
+        name: pyright (see config in pyrightconfig.json)
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+        entry: uv run --frozen pyright
+      - id: pytest
+        name: pytest + coverage floor (see config in pyproject.toml)
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push, manual]
+        entry: uv run --frozen pytest --cov --cov-fail-under=90
+
+  - repo: meta
+    hooks:
+      - id: check-useless-excludes
+        stages: [manual]
+      - id: check-hooks-apply
+        stages: [manual]

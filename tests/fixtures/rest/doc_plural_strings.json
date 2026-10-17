@@ -1,0 +1,11 @@
+{
+    "result": [
+        "computerA",
+        "computerB",
+        "computerC"
+    ],
+    "count": 3,
+    "plural": true,
+    "type": "string",
+    "evaltime_ms": 1.347
+}

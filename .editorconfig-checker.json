@@ -1,0 +1,20 @@
+{
+  "$comment": [
+    "Config for the editorconfig-checker hook in .pre-commit-config.yaml.",
+    "Run locally: `uvx --from editorconfig-checker ec`.",
+    "Scoping belongs in .editorconfig itself wherever it can be expressed",
+    "there, so rules and their exceptions stay in one place. Only what",
+    "EditorConfig cannot express belongs here."
+  ],
+  "Disable": {
+    "IndentSize": true
+  },
+  "$comment_Disable": [
+    "IndentSize checks that left-padding is a multiple of indent_size, which",
+    "flags ruff-format's own docstring and comment prose continuations (the",
+    "hanging-indent continuation lines in __init__.py, ssh.py and others).",
+    "ruff-format already fully governs Python indentation, so this check has",
+    "nothing to add and 19 false positives to contribute. indent_style,",
+    "end_of_line, trailing whitespace and final newline all stay on."
+  ]
+}

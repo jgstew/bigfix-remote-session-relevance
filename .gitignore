@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# bigfix-remote-session-relevance: connection configs and pinned certs carry
+# credentials/hosts and belong under ~/.bigfix/, never in the repo.
+*remote_session_connections*.toml
+!remote_session_connections.example.toml
+*remote_session_known_certs*.toml

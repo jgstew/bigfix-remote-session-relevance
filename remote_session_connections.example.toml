@@ -1,0 +1,58 @@
+# bigfix-remote-session-relevance connections
+#
+# Copy to ~/.bigfix/.remote_session_connections.toml (or run --setup), then:
+#     chmod 600 ~/.bigfix/.remote_session_connections.toml
+#
+# `server` is normally just a host name: https:// and the backend's default
+# port are assumed (rest 52311, explorer 9383, webreports 443). Write out
+# http:// or a port only when they differ.
+schema_version = 1
+
+[defaults]                  # applied to every connection unless overridden
+connect_timeout = 5         # seconds; also how fast an unreachable host is skipped
+read_timeout = 120
+verify = "tofu"             # "tofu" (default) | true | false | "/path/to/ca-bundle.pem"
+# Order used to pick one connection per deployment:
+backend_preference = ["explorer", "rest", "webreports", "saas"]
+
+[[connections]]
+name = "prod-root"                     # unique; display name and --connection value
+backend = "rest"
+server = "bigfix.example.com"          # -> https://bigfix.example.com:52311
+username = "<USERNAME>"
+password_env = "BFRSR_PROD_PASSWORD"   # preferred; or: password = "..."
+# deployment_id is written automatically (sha256 of gather url of bes license)
+
+[[connections]]
+name = "prod-root-token"
+backend = "rest"
+server = "bigfix2.example.com"
+token_env = "BFRSR_PROD_TOKEN"         # BigFix 11.0.6+ bearer token ("API key")
+
+[[connections]]
+name = "prod-explorer"
+backend = "explorer"
+server = "bf-explorer.example.com"     # -> https://bf-explorer.example.com:9383
+username = "<USERNAME>"
+password_env = "BFRSR_PROD_PASSWORD"
+
+[[connections]]
+name = "prod-explorer-mtls"
+backend = "explorer"
+server = "bf-explorer2.example.com"
+client_cert = "~/.bigfix/certs/operator.pem"
+client_key = "~/.bigfix/certs/operator.key"
+client_key_password_env = "BFRSR_CLIENT_KEY_PASSWORD"   # only if the key is encrypted
+
+[[connections]]
+name = "prod-webreports"
+backend = "webreports"
+server = "wr.example.com:8083"         # non-default port, so it is written out
+username = "<WR_USERNAME>"
+password_env = "BFRSR_PROD_WR_PASSWORD"
+
+[[connections]]
+name = "saas-tenant"
+backend = "saas"                       # reserved; not implemented yet
+server = "<tenant>.example.com"
+enabled = false                        # any connection can be disabled

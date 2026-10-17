@@ -1,0 +1,122 @@
+---
+name: pre-commit
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# read-only by default; the cross-repo checkout uses secrets.CROSSREPO_PAT
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-commit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    # no-commit-to-branch guards a developer's local `git commit`; it has nothing
+    # to check on a runner. On a push to main, actions/checkout leaves HEAD on
+    # the main branch, so the hook fails the whole run on a merged PR. (On a
+    # pull_request event HEAD is detached at the merge ref, where it passes -
+    # which is why this only shows up after the merge.) SKIP is read by
+    # pre-commit itself, so it applies to both steps below.
+    #
+    # GH_TOKEN puts zizmor in online mode (offline is the default without it):
+    # it can then fetch the referenced actions themselves for the audits that
+    # need that - see the comment above the zizmor hook in
+    # .pre-commit-config.yaml. The runner's own GITHUB_TOKEN is enough for a
+    # public repo; this is read-only per the `permissions:` block above and
+    # never touches git credentials (actions/checkout above already sets
+    # persist-credentials: false).
+    env:
+      SKIP: no-commit-to-branch
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # requited to grab the history of the PR for pre-commit
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # single source of truth for the uv version: the `rev` of the
+      # astral-sh/uv-pre-commit repo in .pre-commit-config.yaml, which
+      # `pre-commit autoupdate` already keeps current. Read with awk rather
+      # than a yaml parser so it needs nothing installed first. `rev` is
+      # SHA-pinned (Dependabot's pre-commit ecosystem keeps the trailing
+      # `# X.Y.Z` comment in sync when it bumps the SHA - same convention as
+      # the actions/* pins above), so the version comes from that comment;
+      # fall back to the bare `rev` value for a tag-pinned rev with no
+      # comment.
+      - name: read uv version from .pre-commit-config.yaml
+        run: |
+          UV_VERSION="$(awk '
+            /^[[:space:]]*-[[:space:]]*repo:.*astral-sh\/uv-pre-commit[[:space:]]*$/ { found = 1; next }
+            found && $1 == "rev:" {
+              if (match($0, /#[ \t]*(frozen:[ \t]*)?[vV]?[0-9]+(\.[0-9]+)*/)) {
+                ver = substr($0, RSTART, RLENGTH)
+                sub(/^#[ \t]*(frozen:[ \t]*)?[vV]?/, "", ver)
+              } else {
+                ver = $2
+                gsub(/["'\'']/, "", ver)
+                sub(/^[vV]/, "", ver)
+              }
+              print ver
+              exit
+            }
+          ' .pre-commit-config.yaml)"
+          if [ -z "$UV_VERSION" ]; then
+            echo "::error::could not read the astral-sh/uv-pre-commit version from .pre-commit-config.yaml"
+            exit 1
+          fi
+          echo "UV_VERSION=$UV_VERSION" >> "$GITHUB_ENV"
+          echo "uv version: $UV_VERSION"
+
+      # the local `uv-lock-check` / `uv-build-wheel` hooks are language: system
+      # and run at the manual stage, which this workflow always requests. They
+      # look for `uv` on PATH first and only fall back to this repo's .venv,
+      # which does not exist on a runner - so uv has to be installed here or
+      # both hooks fail.
+      - name: install uv (needed by the local pre-commit hooks)
+        run: python -m pip install "uv==${UV_VERSION}"
+
+      - name: pre-commit local action test
+        if: github.event_name != 'workflow_dispatch'
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: >-
+            --color=always
+            --from-ref ${{ github.event.pull_request.base.sha || github.event.before }}
+            --to-ref ${{ github.event.pull_request.head.sha || github.sha }}
+            --hook-stage manual
+
+      # manual dispatch: run every hook (including the manual-stage ones -
+      # validate-pyproject, the pytest wrapper, the check-useless-excludes/
+      # check-hooks-apply meta hooks) against the full tree, not just the
+      # diff range a PR/push would use
+      - name: pre-commit local action test (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        with:
+          extra_args: --color=always --all-files --hook-stage manual
+
+      # `restore-keys` above means a config change restores the previous cache
+      # and then saves it back under the new key - so every hook rev bump would
+      # otherwise leave its old environment in the cache forever (the pytest
+      # hook's fastmcp install is the fat one). gc deletes exactly the
+      # environments no live config references. Last step in the job on purpose:
+      # actions/cache saves in its post step, which runs after this, so what
+      # gets uploaded is the pruned store. No `if:` - the default success()
+      # matches the cache action's own `post-if: success()`, so this runs in
+      # precisely the cases where a save follows. `pre-commit` is on PATH from
+      # the shared action's `python -m pip install pre-commit`.
+      - name: prune unused hook environments before the cache is saved
+        run: pre-commit gc

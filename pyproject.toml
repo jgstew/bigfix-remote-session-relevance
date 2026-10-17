@@ -1,0 +1,128 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bigfix-remote-session-relevance"
+version = "0.1.0"
+description = "Evaluate BigFix session relevance through the REST API, Web Reports SOAP API, or BigFix Explorer, with one common result type."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "JGStew", email = "admin@jgstew.com" },
+]
+requires-python = ">=3.11"
+keywords = ["bigfix", "session-relevance", "rest-api", "web-reports", "bigfix-explorer"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Systems Administration",
+  "Typing :: Typed",
+]
+# Pure-Python dependencies only (no compiled extensions), so the package
+# installs anywhere `uvx` does, including on a BigFix server itself.
+dependencies = [
+  "anyio>=4.4",
+  "certifi>=2024.2.2",
+  "defusedxml>=0.7.1",
+  "filelock>=3.16",
+  "httpx>=0.28",
+  "tomlkit>=0.13",
+]
+
+# Dev tooling lives in a PEP 735 dependency group, which `uv sync` installs by
+# default — an optional-dependencies extra would need `--extra dev` every time.
+[dependency-groups]
+dev = [
+  "mypy>=1.10",
+  "pyright>=1.1.400",
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5",
+  "pytest-xdist>=3.8.0",
+  "ruff>=0.5",
+  "types-defusedxml>=0.7",
+]
+
+[project.scripts]
+bigfix-remote-session-relevance = "bigfix_remote_session_relevance.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/jgstew/bigfix-remote-session-relevance"
+Issues   = "https://github.com/jgstew/bigfix-remote-session-relevance/issues"
+Source   = "https://github.com/jgstew/bigfix-remote-session-relevance"
+
+# --- Build backend ---------------------------------------------------------
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bigfix_remote_session_relevance"]
+
+# --- uv --------------------------------------------------------------------
+
+[tool.uv]
+# Prefer uv-managed CPython so `uv sync` / `uv run` transparently fetch the
+# right interpreter (see .python-version) rather than depending on the
+# system's Python being present.
+python-preference = "managed"
+
+# Supply-chain quarantine: ignore any distribution uploaded in the last 7
+# days, so a compromised or broken release is not picked up during the
+# window in which such uploads are typically caught and yanked. Rolling and
+# relative — evaluated at resolution time, recorded in uv.lock as
+# `exclude-newer-span`. Overridable per run (`--exclude-newer`) or per
+# package (`--exclude-newer-package`) when a fresh release must be taken early.
+exclude-newer = "-P7D"
+
+# --- Tooling ---------------------------------------------------------------
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# Tests are isolated (per-test tmp_path HOME, no shared fixed ports), so
+# fanning out across workers is safe.
+addopts = "-n auto"
+# Everything unmarked runs offline on a bare machine. Marked tests need a real
+# prerequisite and are auto-skipped by tests/conftest.py when it is absent.
+markers = [
+  "tls_local: needs the openssl CLI to mint a throwaway self-signed cert",
+  "live_rest: needs a real root server REST API connection in BFRSR_LIVE_CONFIG (or the default config)",
+  "live_webreports: needs a real Web Reports connection in BFRSR_LIVE_CONFIG (or the default config)",
+  "live_explorer: needs a real BigFix Explorer connection in BFRSR_LIVE_CONFIG (or the default config)",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["B", "I", "UP", "SIM", "RUF", "ASYNC", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is the point of a test; fixture credentials are fake.
+"tests/**" = ["S101", "S105", "S106", "S107", "S108"]
+"scripts/**" = ["S101"]

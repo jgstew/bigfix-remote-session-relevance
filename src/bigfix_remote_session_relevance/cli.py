@@ -1,0 +1,380 @@
+"""``bigfix-remote-session-relevance "relevance"``: query every reachable deployment.
+
+Exit codes: 0 all ok, 1 a relevance error, 2 nothing reachable (or auth
+failed everywhere), 3 partial (some deployments failed), 64 usage/config.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import dataclasses
+import getpass
+import json
+import logging
+import sys
+from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, version
+from typing import Any, NoReturn
+
+from .client import TransportFactory
+from .config import Config, load_config, redacted_summary, resolve_config_path
+from .exceptions import ConfigError
+from .render import EXIT_USAGE, exit_code, render_human
+from .server_address import normalize_server
+from .sync import SessionRelevanceClient
+from .trust import CertInfo, KnownCerts, TrustStore, fetch_server_cert
+
+log = logging.getLogger(__name__)
+
+InputFn = Callable[[str], str]
+
+
+class _UsageError(Exception):
+    pass
+
+
+class _Parser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise _UsageError(message)
+
+
+def _version() -> str:
+    try:
+        return version("bigfix-remote-session-relevance")
+    except PackageNotFoundError:  # pragma: no cover - running from a source tree
+        return "0+unknown"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = _Parser(
+        prog="bigfix-remote-session-relevance",
+        description=(
+            "Evaluate BigFix session relevance on every configured deployment "
+            "(REST API, BigFix Explorer, Web Reports)."
+        ),
+    )
+    p.add_argument("relevance", nargs="?", help='session relevance, or "-" to read stdin')
+    p.add_argument("--version", action="version", version=_version())
+    p.add_argument(
+        "--config",
+        metavar="PATH",
+        help="config file (default: $BFRSR_CONFIG or ~/.bigfix/.remote_session_connections.toml)",
+    )
+
+    setup = p.add_argument_group("setup")
+    setup.add_argument("--setup", action="store_true", help="interactively add connections")
+    setup.add_argument(
+        "--show-config", action="store_true", help="list configured connections (no secrets)"
+    )
+    setup.add_argument(
+        "--discover-deployments",
+        action="store_true",
+        help="re-detect which connections share a deployment",
+    )
+    setup.add_argument("--show-certs", action="store_true", help="list pinned certificates")
+    setup.add_argument(
+        "--trust-cert", metavar="NAME|HOST:PORT", help="fetch and (re)pin a server certificate"
+    )
+    setup.add_argument("--forget-cert", metavar="HOST:PORT", help="remove a pinned certificate")
+
+    sel = p.add_argument_group("selection")
+    sel.add_argument(
+        "--all-connections",
+        action="store_true",
+        help="query every connection, not one per deployment",
+    )
+    sel.add_argument("--connection", action="append", metavar="NAME", help="only this connection")
+    sel.add_argument(
+        "--backend",
+        action="append",
+        choices=["rest", "explorer", "webreports", "saas"],
+        help="only this backend",
+    )
+
+    out = p.add_argument_group("output")
+    out.add_argument("--json", action="store_true", help="JSON list of result objects")
+    out.add_argument("--raw", action="store_true", help="include the raw server response")
+    out.add_argument("-v", "--verbose", action="count", default=0)
+
+    net = p.add_argument_group("network")
+    net.add_argument(
+        "--no-tofu",
+        action="store_true",
+        help="never trust a new self-signed certificate automatically",
+    )
+    net.add_argument("--connect-timeout", type=float, metavar="SECONDS")
+    net.add_argument("--timeout", type=float, metavar="SECONDS", help="read timeout")
+
+    ex = p.add_argument_group("BigFix Explorer extras (additive)")
+    ex.add_argument("--keys", help='rename/nest output fields, e.g. "id name agent { version }"')
+    ex.add_argument(
+        "--filter",
+        action="append",
+        metavar="TYPE=RELEVANCE",
+        help="Explorer filter, e.g. computers='name of it starts with \"a\"'",
+    )
+    return p
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    transport_factory: TransportFactory | None = None,
+    input_fn: InputFn | None = None,
+    getpass_fn: InputFn | None = None,
+    interactive: bool | None = None,
+) -> int:
+    is_interactive = (
+        (sys.stdin.isatty() and sys.stderr.isatty()) if interactive is None else interactive
+    )
+    ask: InputFn = input_fn or _stderr_input
+    secret: InputFn = getpass_fn or getpass.getpass
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except _UsageError as exc:
+        parser.print_usage(sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    _configure_logging(args.verbose)
+
+    try:
+        if args.show_certs:
+            return _show_certs()
+        if args.forget_cert:
+            return _forget_cert(args.forget_cert)
+        if args.setup:
+            from .setup_wizard import run_setup
+
+            return run_setup(resolve_config_path(args.config), input_fn=ask, getpass_fn=secret)
+        config = load_config(args.config)
+        if args.trust_cert:
+            return _trust_cert(args.trust_cert, config, ask)
+        if args.show_config:
+            return _show_config(config)
+        if not config.connections:
+            return _no_connections(args, is_interactive, ask, secret)
+        config = _apply_timeouts(config, args)
+        trust = TrustStore(
+            callback=(lambda info: _prompt_trust(info, ask)) if is_interactive else None,
+            trust_on_first_use=not args.no_tofu,
+        )
+        client_kwargs: dict[str, Any] = {
+            "mode": "all" if args.all_connections else "per_deployment",
+            "connections": args.connection,
+            "backends": args.backend,
+            "trust": trust,
+            "prompt": secret if is_interactive else None,
+            "transport_factory": transport_factory,
+        }
+        if args.discover_deployments:
+            return _discover(config, client_kwargs)
+        relevance = _read_relevance(args.relevance)
+        filters = _parse_filters(args.filter)
+        with SessionRelevanceClient(config, **client_kwargs) as client:
+            if args.keys is not None or filters is not None:
+                results = client.evaluate_explorer(relevance, keys=args.keys, filters=filters)
+            else:
+                results = client.evaluate(relevance)
+    except _UsageError as exc:
+        parser.print_usage(sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except (ValueError, TypeError) as exc:  # invalid Explorer keys/filters
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.json:
+        print(json.dumps(results.to_dict(include_raw=args.raw), indent=2))
+    elif args.raw:
+        for r in results:
+            if r.raw is not None:
+                print(r.raw.text)
+            elif r.error is not None:
+                print(f"{r.connection}: {r.error.kind} error: {r.error.message}", file=sys.stderr)
+    else:
+        render_human(results, out=sys.stdout, err=sys.stderr, verbose=args.verbose)
+    return exit_code(results)
+
+
+# -- helpers -------------------------------------------------------------------------
+
+
+def _stderr_input(prompt: str) -> str:
+    # Prompts go to stderr so stdout stays answers-only even when piped.
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    return sys.stdin.readline().rstrip("\n")
+
+
+def _configure_logging(verbose: int) -> None:
+    level = logging.WARNING if verbose == 0 else logging.INFO if verbose == 1 else logging.DEBUG
+    logging.basicConfig(stream=sys.stderr, level=level, format="%(levelname)s: %(message)s")
+    logging.getLogger("bigfix_remote_session_relevance").setLevel(level)
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.DEBUG if verbose > 2 else logging.WARNING)
+
+
+def _read_relevance(value: str | None) -> str:
+    if value is None:
+        raise _UsageError("a session relevance expression is required (or --setup)")
+    text = sys.stdin.read() if value == "-" else value
+    text = text.strip()
+    if not text:
+        raise _UsageError("the session relevance expression is empty")
+    return text
+
+
+def _parse_filters(values: list[str] | None) -> dict[str, str] | None:
+    if not values:
+        return None
+    filters: dict[str, str] = {}
+    for item in values:
+        name, sep, condition = item.partition("=")
+        if not sep or not name.strip() or not condition.strip():
+            raise _UsageError(f"--filter must be TYPE=RELEVANCE, not {item!r}")
+        filters[name.strip()] = condition.strip()
+    return filters
+
+
+def _apply_timeouts(config: Config, args: argparse.Namespace) -> Config:
+    if args.connect_timeout is None and args.timeout is None:
+        return config
+    connections = tuple(
+        dataclasses.replace(
+            c,
+            connect_timeout=c.connect_timeout
+            if args.connect_timeout is None
+            else args.connect_timeout,
+            read_timeout=c.read_timeout if args.timeout is None else args.timeout,
+        )
+        for c in config.connections
+    )
+    return dataclasses.replace(config, connections=connections)
+
+
+def _no_connections(
+    args: argparse.Namespace, interactive: bool, ask: InputFn, secret: InputFn
+) -> int:
+    path = resolve_config_path(args.config)
+    if interactive:
+        answer = ask(f"No connections configured in {path}. Run setup now? [Y/n] ")
+        if answer.strip().lower() in ("", "y", "yes"):
+            from .setup_wizard import run_setup
+
+            return run_setup(path, input_fn=ask, getpass_fn=secret)
+    print(
+        f"no connections configured in {path}; run: bigfix-remote-session-relevance --setup",
+        file=sys.stderr,
+    )
+    return EXIT_USAGE
+
+
+def _prompt_trust(info: CertInfo, ask: InputFn) -> bool:
+    sys.stderr.write(
+        f"\nThe certificate for {info.host_port} is not signed by a trusted CA.\n"
+        f"  SHA-256 fingerprint: {info.fingerprint}\n"
+        "Compare it with the server's certificate before trusting it.\n"
+    )
+    return ask("Trust and pin this certificate? [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _show_config(config: Config) -> int:
+    rows = redacted_summary(config)
+    print(f"# {config.path or '(no file)'} ({config.source})")
+    if not rows:
+        print("(no connections)")
+        return 0
+    columns = [
+        "name",
+        "backend",
+        "server",
+        "auth",
+        "password",
+        "token",
+        "deployment_id",
+        "verify",
+        "enabled",
+    ]
+    table = [[_cell(c, r[c]) for c in columns] for r in rows]
+    widths = [max(len(c), *(len(row[i]) for row in table)) for i, c in enumerate(columns)]
+    print("  ".join(c.ljust(w) for c, w in zip(columns, widths, strict=True)))
+    for row in table:
+        print("  ".join(v.ljust(w) for v, w in zip(row, widths, strict=True)))
+    return 0
+
+
+def _cell(column: str, value: Any) -> str:
+    if value is None:
+        return "-"
+    if column == "deployment_id":
+        return f"{str(value)[:12]}…"
+    return str(value)
+
+
+def _show_certs() -> int:
+    known = KnownCerts()
+    pins = known.all()
+    print(f"# {known.path}")
+    for pin in pins:
+        print(
+            f"{pin.host_port}  sha256={pin.sha256[:16]}…  first_seen={pin.first_seen}  "
+            f"trusted_by={pin.trusted_by}"
+        )
+    if not pins:
+        print("(no pinned certificates)")
+    return 0
+
+
+def _forget_cert(host_port: str) -> int:
+    if KnownCerts().forget(host_port):
+        print(f"forgot the pinned certificate for {host_port}")
+        return 0
+    print(f"no pinned certificate for {host_port}", file=sys.stderr)
+    return 1
+
+
+def _trust_cert(target: str, config: Config, ask: InputFn) -> int:
+    names = {c.name: c for c in config.connections}
+    if target in names:
+        address = names[target].address
+    else:
+        if ":" not in target.split("]")[-1]:
+            raise _UsageError("--trust-cert needs a connection NAME or HOST:PORT")
+        address = normalize_server(target, "rest")
+    if address.scheme != "https":
+        raise _UsageError(f"{target} uses http://; there is no certificate to trust")
+    info = asyncio.run(fetch_server_cert(address.host, address.port))
+    known = KnownCerts()
+    existing = known.get(info.host_port)
+    print(f"{info.host_port}\n  SHA-256 fingerprint: {info.fingerprint}")
+    if existing and existing.sha256 == info.sha256:
+        print("  already pinned with this fingerprint")
+        return 0
+    if existing:
+        print(
+            f"  REPLACES the pinned sha256 {existing.sha256[:16]}… "
+            f"(first seen {existing.first_seen})"
+        )
+    if ask("Trust and pin this certificate? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("not pinned", file=sys.stderr)
+        return 1
+    known.pin(info, trusted_by="prompt")
+    print(f"pinned in {known.path}")
+    return 0
+
+
+def _discover(config: Config, client_kwargs: dict[str, Any]) -> int:
+    with SessionRelevanceClient(config, **client_kwargs) as client:
+        found = client.discover_deployments(force=True)
+    for name, deployment_id in found.items():
+        print(f"{name}: {deployment_id or '(not discovered)'}")
+    return 0 if any(found.values()) else 2
+
+
+def run() -> None:  # pragma: no cover - console entry convenience
+    sys.exit(main())
