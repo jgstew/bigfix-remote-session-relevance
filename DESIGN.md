@@ -106,10 +106,11 @@ the bigfix-saas MCP server, which makes the same choices).
   `exp - iat`, timed on the local clock) or after a 401, then one fresh login
   if refresh fails. The refresh token appears to be single-use.
 - **Lockout safety:** 100 failed logins lock the account for good, so a
-  rejected login is cached and never sent again by that backend
-  (`authentication` / `login_failed`). Known signals become codes:
-  `totp_required` (answered through the interactive prompt when there is
-  one), `activate_mfa_required`, `password_change_required`, `mfa_mismatch`,
+  rejected login is cached and never sent again by that backend, or by any
+  connection sharing its sign-in (`authentication` / `login_failed`). Known
+  signals become codes: `totp_required` (answered through the interactive
+  prompt when there is one), `activate_mfa_required`,
+  `password_change_required`, `mfa_mismatch`,
   `max_concurrent_sessions_reached`.
 - Answers are typed like the REST API's:
   `{"data": {"answer": [...], "evaltime", "count", "plural", "type"}}` (tuples
@@ -118,6 +119,39 @@ the bigfix-saas MCP server, which makes the same choices).
   identically.
 - No Explorer extras: `prefilter` takes BigFix's criteria DSL, not relevance
   strings, so it does not fit `ExplorerExtras`.
+- **Setup:** `--setup` treats an https `login.` / `eulogin.` / `api.` /
+  `euapi.` host under `bigfix.com` as SaaS (other allowlisted hosts are
+  configured by hand) and asks for an email instead of a username. It signs in
+  **once**, through one `SaasBackend` (so a rejected login is never resent),
+  prompting for a TOTP code only when the service answers `totp_required`, and
+  evaluates `sha256 of gather url of bes license` to record `deployment_id`. A
+  rejected sign-in is reported and nothing is saved (saving it would resend
+  the password on every run). Connections are saved with `verify = true`: the
+  service is CA-signed, so trust on first use would only ever pin an
+  intercepting proxy.
+- **Several BigFix servers (decision):** when `data.pids.bf` lists more than
+  one server, setup asks each one (setting `sid` on the same signed-in
+  backend, so still one login) and saves **one connection per `sid`**, each
+  with its own `deployment_id`. An account with one server is saved without
+  `sid` (the gateway's default is that server). The client does **not**
+  expand a sid-less connection into one group per server: a connection is one
+  endpoint everywhere else (its name in results, `--connection`, the recorded
+  `deployment_id`, failover), and expanding would need a login before
+  grouping.
+- **One sign-in per account (decision):** connections with the same API host,
+  email and password share one `SaasSession` (cookies, expiry, the account's
+  servers, a cached login failure), held in a `SaasSessionPool` that
+  `AsyncSessionRelevanceClient` owns. A lock makes concurrent connections wait
+  for a single login (and a single TOTP prompt) and reuse its success or its
+  failure, so N servers cost one login per client, and a wrong password one
+  failure. Renewal is shared the same way: a 401 triggers one refresh, and a
+  connection whose 401 came from cookies another one has already renewed just
+  retries with the new cookies. Each connection keeps its own HTTP client and
+  `sid`; the cookies are copied into it. The password is part of the key (as
+  a SHA-256 digest), so a connection with a different password signs in on
+  its own. A `SaasBackend` used directly, without a pool, keeps its own
+  session as before. A 5xx answer to the login is not cached (it may be
+  transient), so each waiting connection may try once more.
 
 ### BigFix Explorer
 
@@ -242,9 +276,12 @@ prompt, else an `authentication` error without any request.
 
 ## Open questions
 
-- **SaaS:** a tenant with several BigFix servers (`data.pids.bf` lists them)
-  needs one connection per `sid`; enumerating them automatically is not built.
-  Logout on close is not sent (v1 sessions are not counted against the cap).
+- **SaaS:** what the gateway does with no `sid` on an account with several
+  servers (setup does not rely on it; only one-server accounts were seen
+  live). Whether the service treats email case-insensitively (the shared
+  sign-in key compares it exactly, so differently cased connections sign in
+  separately). Logout on close is not sent (v1 sessions are not counted
+  against the cap).
 - Whether the second URL decode on the no-Explorer path (confirmed live:
   `%xx` only, not `+`) happens in the root server or in the Web Reports it
   forwards to. It does not change what the client must send.

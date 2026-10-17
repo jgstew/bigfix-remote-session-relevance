@@ -22,6 +22,7 @@ import httpx
 from .backends.base import Backend, TrustPolicy
 from .backends.explorer_extras import explorer_body, supports_explorer_extras
 from .backends.registry import BACKEND_CLASSES, backend_from_config
+from .backends.saas import SaasBackend, SaasSessionPool
 from .config import Config, ConnectionConfig, load_config, set_deployment_id
 from .deployment import discover_deployment_id, group_key
 from .exceptions import ConfigError
@@ -108,6 +109,9 @@ class AsyncSessionRelevanceClient:
         self._connections = selected
         self._deployment_ids: dict[str, str | None] = {c.name: c.deployment_id for c in selected}
         self._backends: dict[str, Backend] = {}
+        # BigFix SaaS connections of one account share one sign-in: --setup
+        # saves one per server, and failed logins lock the account for good.
+        self._saas_sessions = SaasSessionPool()
         self._preferred: dict[str, str] = {}
         self._discovered = False
         self._discovery_lock: asyncio.Lock | None = None
@@ -178,6 +182,8 @@ class AsyncSessionRelevanceClient:
                     conn, trust=self._trust, prompt=self._prompt, transport=transport
                 )
                 backend.deployment_id = self._deployment_ids[conn.name]
+                if isinstance(backend, SaasBackend):
+                    self._saas_sessions.attach(backend)
                 self._backends[conn.name] = backend
 
     async def _limited(

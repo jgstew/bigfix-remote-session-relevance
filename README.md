@@ -42,7 +42,13 @@ uvx bigfix-remote-session-relevance --setup
 The wizard asks for a host, username and password, probes the REST API
 (52311), Explorer (9383) and Web Reports (443/8083/80/8080), pins
 certificates after showing their fingerprints, and writes
-`~/.bigfix/.remote_session_connections.toml` (mode 0600). See
+`~/.bigfix/.remote_session_connections.toml` (mode 0600).
+
+For BigFix SaaS, enter `login.bigfix.com` (or `eulogin.bigfix.com`) as the
+host, then your email and password; a TOTP code is asked for only if your
+account uses MFA. Setup signs in once and saves one connection per BigFix
+server your account can reach. A rejected sign-in is never retried or saved:
+BigFix SaaS locks an account after 100 failed logins. See
 [remote_session_connections.example.toml](remote_session_connections.example.toml)
 for every option. `server` is normally just a host name: `https://` and the
 backend's default port are assumed.

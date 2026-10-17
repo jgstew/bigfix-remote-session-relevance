@@ -21,8 +21,13 @@ bigfix-saas MCP server, which pins the same choices):
   ``{"data": {"answer": [...], "evaltime", "count", "plural", "type"}}``;
   relevance errors are ``{"data": {"error": "..."}}`` with HTTP 200.
 * 100 failed logins lock the account for good, so a rejected login is never
-  sent again by the same backend. The only second attempt is the server's
-  own ``totp_required`` challenge, answered through ``totp_prompt``.
+  sent again. The only second attempt is the server's own ``totp_required``
+  challenge, answered through ``totp_prompt``.
+* Backends of one account (API host + email + password) attached to the same
+  `SaasSessionPool` share one `SaasSession`: one login, one cached failure and
+  one refresh for all of them. ``--setup`` saves one connection per ``sid``,
+  so without this an account with N servers would cost N logins per run, and
+  a wrong password N failed logins per run.
 
 SaaS ``prefilter`` uses BigFix's criteria DSL, not relevance strings, so this
 backend does not implement the Explorer extras.
@@ -30,6 +35,8 @@ backend does not implement the Explorer extras.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -60,7 +67,56 @@ _LOGIN_SIGNAL_MESSAGES = {
     "max_concurrent_sessions_reached": "the account has reached its concurrent session limit",
 }
 
-__all__ = ["SaasBackend", "parse_saas_relevance", "saas_api_address"]
+__all__ = [
+    "SaasBackend",
+    "SaasSession",
+    "SaasSessionPool",
+    "parse_saas_relevance",
+    "saas_api_address",
+]
+
+
+class SaasSession:
+    """One sign-in to a BigFix SaaS account, shared by that account's backends.
+
+    Holds what a login produced (the cookies, the expiry, the account's
+    servers) or the login failure, behind a lock, so concurrent backends wait
+    for a single login and reuse its success or its failure. ``generation``
+    counts sign-ins and renewals: a backend copies the cookies into its own
+    HTTP client when it is behind, and skips a renewal that another backend
+    already made (the refresh token appears to be single-use).
+    """
+
+    def __init__(self) -> None:
+        self.cookies = httpx.Cookies()
+        self.until: float | None = None  # monotonic deadline
+        self.failure: ResultError | None = None
+        self.servers: tuple[str, ...] = ()
+        self.generation = 0
+        self.lock = asyncio.Lock()
+
+    def fresh(self) -> bool:
+        return (
+            self.failure is None
+            and self.until is not None
+            and time.monotonic() < self.until - EXPIRY_SLACK_S
+        )
+
+
+class SaasSessionPool:
+    """Sessions keyed by account: API host, email and password.
+
+    `AsyncSessionRelevanceClient` owns one and attaches every SaaS backend it
+    builds. The password is part of the key (as a digest), so a connection
+    with a different password never borrows, or poisons, another's session.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[tuple[str, str, str], SaasSession] = {}
+
+    def attach(self, backend: SaasBackend) -> None:
+        """Share the account's session. Call before the backend's first request."""
+        backend._session = self._sessions.setdefault(backend._account_key(), SaasSession())
 
 
 class SaasBackend(Backend):
@@ -79,9 +135,17 @@ class SaasBackend(Backend):
         self.address = saas_api_address(self.address)
         self.sid = sid
         self._totp_prompt = totp_prompt
-        self._session_until: float | None = None  # monotonic deadline
-        self._login_failure: ResultError | None = None
-        self.servers: tuple[str, ...] = ()
+        self._session = SaasSession()  # private unless a SaasSessionPool attaches it
+        self._synced: tuple[httpx.AsyncClient, int] | None = None
+
+    @property
+    def servers(self) -> tuple[str, ...]:
+        """The account's BigFix servers (``sid`` values), known after sign-in."""
+        return self._session.servers
+
+    def _account_key(self) -> tuple[str, str, str]:
+        password = hashlib.sha256((self._password or "").encode()).hexdigest()
+        return (self.address.base_url, self.username or "", password)
 
     @classmethod
     def _config_kwargs(
@@ -112,45 +176,71 @@ class SaasBackend(Backend):
         problem = await self._ensure_session(client)
         if problem is not None:
             return SessionRelevanceResult.failure(relevance, problem)
+        generation = self._sync_cookies(client)
         response = await self._post(client, RELEVANCE_PATH, {"query": relevance}, sid=self.sid)
         if response.status_code == 401:
-            problem = await self._renew(client)
+            problem = await self._renew(client, generation)
             if problem is not None:
                 return SessionRelevanceResult.failure(relevance, problem)
+            self._sync_cookies(client)
             response = await self._post(client, RELEVANCE_PATH, {"query": relevance}, sid=self.sid)
         return parse_saas_relevance(relevance, response, self.name)
 
     # -- session ----------------------------------------------------------------------
 
-    async def _ensure_session(self, client: httpx.AsyncClient) -> ResultError | None:
-        if self._login_failure is not None:
-            return self._login_failure
-        if self._session_until is not None:
-            if time.monotonic() < self._session_until - EXPIRY_SLACK_S:
-                return None
-            return await self._renew(client)
-        return await self._login(client)
+    def _sync_cookies(self, client: httpx.AsyncClient) -> int:
+        """Give this client the session's current cookies; return their generation."""
+        session = self._session
+        if self._synced != (client, session.generation):
+            client.cookies = session.cookies
+            self._synced = (client, session.generation)
+        return session.generation
 
-    async def _renew(self, client: httpx.AsyncClient) -> ResultError | None:
-        """Refresh the cookies; if that fails, sign in again.
+    async def _ensure_session(self, client: httpx.AsyncClient) -> ResultError | None:
+        session = self._session
+        if session.fresh():
+            return None
+        async with session.lock:  # whoever waited here reuses the first login's outcome
+            if session.failure is not None:
+                return session.failure
+            if session.until is None:
+                return await self._login(client)
+            if session.fresh():
+                return None
+            return await self._refresh(client)
+
+    async def _renew(self, client: httpx.AsyncClient, generation: int) -> ResultError | None:
+        """After a 401 on a request sent with ``generation``'s cookies."""
+        session = self._session
+        async with session.lock:
+            if session.failure is not None:
+                return session.failure
+            if session.generation != generation:
+                return None  # another backend renewed the session meanwhile
+            return await self._refresh(client)
+
+    async def _refresh(self, client: httpx.AsyncClient) -> ResultError | None:
+        """Refresh the cookies; if that fails, sign in again. Holds the lock.
 
         A fresh login is safe here: it only happens after an earlier login
         with these credentials succeeded, so it cannot add to a failure count.
         """
+        self._sync_cookies(client)
         response = await self._post(client, REFRESH_PATH, None)
-        if response.status_code == 200 and self._accept_session(response):
+        if response.status_code == 200 and self._accept_session(client, response):
             return None
-        self._session_until = None
+        self._session.until = None
         return await self._login(client)
 
     async def _login(
         self, client: httpx.AsyncClient, totp: str | None = None
     ) -> ResultError | None:
+        """Sign in. Holds the session lock, so at most one login per account runs."""
         data: dict[str, Any] = {"email": self.username or "", "password": self._password or ""}
         if totp is not None:
             data["totp"] = totp
         response = await self._post(client, LOGIN_PATH, data)
-        if response.status_code == 200 and self._accept_session(response):
+        if response.status_code == 200 and self._accept_session(client, response):
             return None
         signal = _error_message(response)
         if (
@@ -173,12 +263,12 @@ class SaasBackend(Backend):
             message=_LOGIN_SIGNAL_MESSAGES[signal] if known and signal else "credentials rejected",
             detail=signal,
         )
-        # Never POST these credentials again from this backend: repeated
-        # failures lock a BigFix SaaS account permanently.
-        self._login_failure = error
+        # Never POST these credentials again, from this backend or any other
+        # sharing the session: repeated failures lock the account for good.
+        self._session.failure = error
         return error
 
-    def _accept_session(self, response: httpx.Response) -> bool:
+    def _accept_session(self, client: httpx.AsyncClient, response: httpx.Response) -> bool:
         try:
             body = response.json()
         except ValueError:
@@ -190,10 +280,14 @@ class SaasBackend(Backend):
         # skew between here and the service does not matter.
         iat, exp = data.get("iat"), data.get("exp")
         lifetime = float(exp - iat) if isinstance(iat, int) and isinstance(exp, int) else 3600.0
-        self._session_until = time.monotonic() + max(lifetime, 0.0)
+        session = self._session
+        session.until = time.monotonic() + max(lifetime, 0.0)
         pids = data.get("pids")
         if isinstance(pids, dict) and isinstance(pids.get("bf"), dict):
-            self.servers = tuple(f"bf{key}" for key in pids["bf"])
+            session.servers = tuple(f"bf{key}" for key in pids["bf"])
+        session.cookies = httpx.Cookies(client.cookies)  # a copy: each client has its own jar
+        session.generation += 1
+        self._synced = (client, session.generation)
         return True
 
     async def _post(

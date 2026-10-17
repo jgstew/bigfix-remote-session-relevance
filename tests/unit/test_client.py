@@ -206,6 +206,77 @@ async def test_mode_all_queries_every_connection() -> None:
     assert [r.ok for r in results] == [False, True, True]
 
 
+def _saas_conn(sid: str, email: str = "operator@example.com") -> ConnectionConfig:
+    return ConnectionConfig(
+        name=f"saas-{sid}",
+        backend="saas",
+        server="login.bigfix.com",
+        username=email,
+        password="pw",
+        sid=sid,
+        verify=True,
+    )
+
+
+def _saas_route(logins: list[str], login: httpx.Response) -> Callable[[httpx.Request], Any]:
+    """One BigFix SaaS account; each sid reports its own deployment id."""
+
+    async def route(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.01)  # let concurrent connections overlap
+        if request.url.path == "/auth/v1/user/login":
+            logins.append(request.url.path)
+            return login
+        sid = json.loads(request.content)["sid"]
+        answer = sid[-1] * 64 if "sha256" in json.loads(request.content)["data"]["query"] else 1
+        data = {"answer": [answer], "plural": False, "type": "string", "evaltime": 1}
+        return httpx.Response(200, json={"status": 200, "data": data})
+
+    return route
+
+
+_SAAS_LOGIN_OK = httpx.Response(
+    200,
+    json={"status": 200, "data": {"iat": 0, "exp": 3600, "pids": {"bf": {"1": {}, "2": {}}}}},
+    headers={"set-cookie": "accessToken=A; Path=/; HttpOnly; Secure"},
+)
+
+
+@pytest.mark.parametrize("mode", ["per_deployment", "all"])
+async def test_saas_connections_of_one_account_sign_in_once(mode: str) -> None:
+    # --setup saves one connection per sid; they must share one sign-in.
+    conns = [_saas_conn("bf1"), _saas_conn("bf2"), _saas_conn("bf3")]
+    logins: list[str] = []
+    route = _saas_route(logins, _SAAS_LOGIN_OK)
+    router = Router({c.name: route for c in conns})
+    async with _client(conns, router, mode=mode) as client:
+        first = await client.evaluate("1")  # per_deployment: discovery first, concurrently
+        second = await client.evaluate("1")
+    assert first.ok and second.ok
+    assert len(first) == 3
+    assert len(logins) == 1
+
+
+async def test_rejected_saas_login_is_sent_once_per_client() -> None:
+    conns = [_saas_conn("bf1"), _saas_conn("bf2"), _saas_conn("bf3")]
+    logins: list[str] = []
+    rejected = httpx.Response(401, json={"status": 401, "data": {"errorMessage": "Incorrect."}})
+    router = Router({c.name: _saas_route(logins, rejected) for c in conns})
+    async with _client(conns, router) as client:
+        results = [*await client.evaluate("1"), *await client.evaluate("2")]
+    assert len(logins) == 1
+    assert all(r.error is not None and r.error.code == "login_failed" for r in results)
+
+
+async def test_saas_connections_of_different_accounts_sign_in_separately() -> None:
+    conns = [_saas_conn("bf1"), _saas_conn("bf2", email="someone.else@example.com")]
+    logins: list[str] = []
+    route = _saas_route(logins, _SAAS_LOGIN_OK)
+    router = Router({c.name: route for c in conns})
+    async with _client(conns, router, mode="all") as client:
+        assert (await client.evaluate("1")).ok
+    assert len(logins) == 2
+
+
 async def test_filters_by_name_and_backend() -> None:
     conns = [_conn("a-ex", "explorer", D1), _conn("a-root", "rest", D1), _conn("b", "rest", D2)]
     router = Router({c.name: [_ok()] for c in conns})

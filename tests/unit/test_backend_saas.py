@@ -6,8 +6,10 @@ Request shapes come from the service's OpenAPI spec and a live login
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +18,11 @@ import pytest
 
 from bigfix_remote_session_relevance.backends.explorer_extras import supports_explorer_extras
 from bigfix_remote_session_relevance.backends.rest import RestBackend
-from bigfix_remote_session_relevance.backends.saas import SaasBackend, saas_api_address
+from bigfix_remote_session_relevance.backends.saas import (
+    SaasBackend,
+    SaasSessionPool,
+    saas_api_address,
+)
 from bigfix_remote_session_relevance.exceptions import ConfigError
 from bigfix_remote_session_relevance.server_address import normalize_server
 
@@ -356,3 +362,158 @@ async def test_no_password_makes_no_request(recording_transport: type) -> None:
 
 def test_secrets_not_in_repr() -> None:
     assert "s3cret" not in repr(SaasBackend("login.bigfix.com", username="u", password="s3cret"))
+
+
+# -- one sign-in per account ------------------------------------------------------------
+
+
+class Account:
+    """A fake BigFix SaaS account: counts requests per path across connections.
+
+    Handlers yield to the event loop before answering, so concurrent
+    connections really overlap while a login or refresh is in flight.
+    ``logins`` are answered in order; the last one repeats.
+    """
+
+    def __init__(self, *logins: httpx.Response) -> None:
+        self.paths: Counter[str] = Counter()
+        self.sids: list[str | None] = []
+        self.cookies: list[str] = []
+        self._logins = list(logins) or [_login_ok()]
+        self.refreshed = False
+
+    def transport(self) -> httpx.AsyncBaseTransport:
+        return httpx.MockTransport(self._handle)
+
+    async def _handle(self, request: httpx.Request) -> httpx.Response:
+        self.paths[request.url.path] += 1
+        await asyncio.sleep(0.01)
+        if request.url.path == "/auth/v1/user/login":
+            return self._logins.pop(0) if len(self._logins) > 1 else self._logins[0]
+        if request.url.path == "/auth/v1/token/refresh":
+            self.refreshed = True
+            return httpx.Response(
+                200,
+                text=LOGIN_OK_BODY,
+                headers=[("set-cookie", "accessToken=ACCESS-2; Path=/; HttpOnly; Secure")],
+            )
+        cookie = request.headers.get("cookie", "")
+        self.cookies.append(cookie)
+        self.sids.append(_body(request).get("sid"))
+        if self.refreshed and "accessToken=ACCESS-2" not in cookie:
+            return _auth_fail(status=401)
+        return _captured("singular_integer")
+
+
+def _pooled(
+    pool: SaasSessionPool,
+    account: Account,
+    *,
+    server: str = "login.bigfix.com",
+    email: str = "operator@example.com",
+    password: str = "pw",
+    sid: str | None = None,
+    totp_prompt: Any = None,
+) -> SaasBackend:
+    backend = SaasBackend(
+        server,
+        username=email,
+        password=password,
+        sid=sid,
+        totp_prompt=totp_prompt,
+        transport=account.transport(),
+    )
+    pool.attach(backend)
+    return backend
+
+
+async def test_connections_of_one_account_share_one_login() -> None:
+    # --setup saves one connection per sid; N servers must not mean N logins.
+    account, pool = Account(), SaasSessionPool()
+    backends = [_pooled(pool, account, sid=f"bf{n}") for n in (1, 2, 3)]
+    results = await asyncio.gather(*(b.evaluate("1") for b in backends))
+    results += await asyncio.gather(*(b.evaluate("2") for b in backends))
+    for b in backends:
+        await b.aclose()
+    assert all(r.ok for r in results), [r.error for r in results]
+    assert account.paths["/auth/v1/user/login"] == 1
+    assert account.paths["/bfproxy/v2/relevance"] == 6
+    assert Counter(account.sids) == Counter({"bf1": 2, "bf2": 2, "bf3": 2})
+    # Every connection uses the one session's cookies.
+    assert all("accessToken=ACCESS-1" in c for c in account.cookies)
+    assert all(b.servers == ("bf160001489",) for b in backends)
+
+
+async def test_rejected_login_is_shared_and_never_resent() -> None:
+    # 100 failed logins lock the account for good: a wrong password must
+    # cost one failure per run, not one per server.
+    account, pool = Account(_auth_fail()), SaasSessionPool()
+    backends = [_pooled(pool, account, sid=f"bf{n}") for n in (1, 2, 3)]
+    results = await asyncio.gather(*(b.evaluate("1") for b in backends))
+    for b in backends:
+        results.append(await b.evaluate("2"))
+        await b.aclose()
+    assert account.paths == Counter({"/auth/v1/user/login": 1})
+    for result in results:
+        assert result.error is not None
+        assert (result.error.kind, result.error.code) == ("authentication", "login_failed")
+
+
+async def test_totp_is_asked_once_for_the_account() -> None:
+    account = Account(_auth_fail("totp_required"), _login_ok())
+    pool = SaasSessionPool()
+    prompts: list[str] = []
+
+    def prompt(message: str) -> str:
+        prompts.append(message)
+        return "123456"
+
+    backends = [_pooled(pool, account, sid=f"bf{n}", totp_prompt=prompt) for n in (1, 2)]
+    results = await asyncio.gather(*(b.evaluate("1") for b in backends))
+    assert all(r.ok for r in results), [r.error for r in results]
+    assert len(prompts) == 1
+    assert account.paths["/auth/v1/user/login"] == 2  # the challenge, then the answer
+
+
+async def test_concurrent_expiry_refreshes_once() -> None:
+    # The refresh token appears to be single-use: two connections refreshing
+    # at once would invalidate each other.
+    account, pool = Account(), SaasSessionPool()
+    backends = [_pooled(pool, account, sid=f"bf{n}") for n in (1, 2)]
+    await asyncio.gather(*(b.evaluate("1") for b in backends))
+    account.refreshed = True  # the server has expired ACCESS-1
+    results = await asyncio.gather(*(b.evaluate("2") for b in backends))
+    assert all(r.ok for r in results), [r.error for r in results]
+    assert account.paths["/auth/v1/token/refresh"] == 1
+    assert account.paths["/auth/v1/user/login"] == 1
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"email": "someone.else@example.com"},
+        {"password": "a different password"},
+        {"server": "eulogin.bigfix.com"},
+    ],
+)
+async def test_a_different_account_signs_in_separately(other: dict[str, str]) -> None:
+    account, pool = Account(), SaasSessionPool()
+    first = _pooled(pool, account)
+    second = _pooled(pool, account, **other)
+    await asyncio.gather(first.evaluate("1"), second.evaluate("1"))
+    assert account.paths["/auth/v1/user/login"] == 2
+
+
+async def test_backend_outside_a_pool_keeps_its_own_session() -> None:
+    account = Account()
+    backends = [
+        SaasBackend(
+            "login.bigfix.com",
+            username="u@example.com",
+            password="pw",
+            transport=account.transport(),
+        )
+        for _ in range(2)
+    ]
+    await asyncio.gather(*(b.evaluate("1") for b in backends))
+    assert account.paths["/auth/v1/user/login"] == 2
