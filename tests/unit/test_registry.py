@@ -41,11 +41,17 @@ def test_backend_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
     assert backend.timeout.read == 9
 
 
-async def test_saas_is_a_not_implemented_stub() -> None:
-    conn = ConnectionConfig(name="tenant", backend="saas", server="tenant.example.com")
-    async with backend_from_config(conn) as backend:
-        result = await backend.evaluate("1")
-    assert result.error is not None
-    assert result.error.kind == "not_implemented"
-    assert result.connection == "tenant"
-    assert result.backend == "saas"
+def test_saas_from_config() -> None:
+    conn = ConnectionConfig(
+        name="tenant",
+        backend="saas",
+        server="login.bigfix.com",
+        username="operator@example.com",
+        password="pw",
+        sid="bf160001489",
+    )
+    backend = backend_from_config(conn)
+    assert isinstance(backend, SaasBackend)
+    assert backend.sid == "bf160001489"
+    assert backend.address.base_url == "https://api.bigfix.com"
+    assert backend.connection == "tenant"

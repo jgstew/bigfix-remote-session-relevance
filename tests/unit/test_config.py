@@ -339,3 +339,57 @@ def test_redacted_summary_auth_column(tmp_path: Path) -> None:
     assert [r["auth"] for r in rows] == ["token", "mtls", "basic", "token"]
     assert "inline-token" not in repr(rows)
     assert "op.key" not in repr(rows)
+
+
+SAAS_SAMPLE = """\
+[[connections]]
+name = "tenant"
+backend = "saas"
+server = "login.bigfix.com"
+username = "operator@example.com"
+password_env = "TEST_BFRSR_SAAS_PW"
+sid = "bf160001489"
+"""
+
+
+def test_saas_connection(tmp_path: Path) -> None:
+    (conn,) = load_config(_write(tmp_path / "c.toml", SAAS_SAMPLE)).connections
+    assert (conn.backend, conn.sid, conn.auth) == ("saas", "bf160001489", "basic")
+    assert conn.address.base_url == "https://login.bigfix.com"
+
+
+@pytest.mark.parametrize(
+    ("extra", "match"),
+    [
+        ('server = "tenant.example.com"\n', "SaaS"),
+        ('server = "http://login.bigfix.com"\n', "SaaS"),
+        ('token = "t"\n', "token"),
+        ('sid = "160001489"\n', "sid"),
+    ],
+)
+def test_saas_validation(tmp_path: Path, extra: str, match: str) -> None:
+    text = '[[connections]]\nname = "t"\nbackend = "saas"\nusername = "u"\n'
+    if "server" not in extra:
+        text += 'server = "login.bigfix.com"\n'
+    if "token" in extra:
+        text = text.replace('username = "u"\n', "")
+    with pytest.raises(ConfigError, match=match):
+        load_config(_write(tmp_path / "c.toml", text + extra))
+
+
+def test_sid_saved_and_shown(tmp_path: Path) -> None:
+    path = tmp_path / "c.toml"
+    save_connection(
+        path,
+        ConnectionConfig(
+            name="tenant",
+            backend="saas",
+            server="login.bigfix.com",
+            username="u",
+            password_env="P",
+            sid="bf1",
+        ),
+    )
+    (conn,) = load_config(path).connections
+    assert conn.sid == "bf1"
+    assert redacted_summary(load_config(path))[0]["sid"] == "bf1"

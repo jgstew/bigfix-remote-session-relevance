@@ -103,3 +103,30 @@ def _split_host_port(hostport: str, original: str) -> tuple[str, str | None]:
         return hostport, None
     host, sep, port = hostport.partition(":")
     return host, (port if sep else None)
+
+
+# The password is POSTed to the SaaS API host, so it is held to these
+# prefixes instead of trusting whatever host a config names (the same rule
+# the bigfix-saas MCP server enforces).
+_SAAS_LOGIN_TO_API = {"login.": "api.", "eulogin.": "euapi."}
+_SAAS_API_PREFIXES = ("api.", "euapi.")
+
+
+def saas_api_address(address: ServerAddress) -> ServerAddress:
+    """``login.bigfix.com`` -> ``api.bigfix.com`` (``eulogin.`` -> ``euapi.``).
+
+    The web UI lives on ``login.*`` hosts and the API gateway on ``api.*``
+    hosts. An API host passes through unchanged; anything else, or http, is
+    refused.
+    """
+    host = address.host
+    if address.scheme == "https":
+        for login, api in _SAAS_LOGIN_TO_API.items():
+            if host.startswith(login):
+                return ServerAddress("https", api + host[len(login) :], address.port)
+        if host.startswith(_SAAS_API_PREFIXES):
+            return address
+    raise ConfigError(
+        f"BigFix SaaS server {address.base_url!r} is not allowed: use https with a "
+        "login., eulogin., api. or euapi. host (e.g. login.bigfix.com)"
+    )

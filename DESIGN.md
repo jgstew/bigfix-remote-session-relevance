@@ -13,7 +13,7 @@ the observed behaviour wins and the code says so.
 | `rest` | `POST /api/query`, form `relevance` + `output=json` | JSON (XML fallback) | Basic or bearer token | https, 52311 |
 | `explorer` | `POST /api/relevance`, JSON `{"relevance": …}` | JSON | Basic, bearer token, or mTLS | https, 9383 |
 | `webreports` | `POST /webreports/soap`, `GetStructuredRelevanceResult` | SOAP XML | `LoginHeader`, then `AuthenticateHeader` + session token | https, 443 |
-| `saas` | not implemented: no public API docs | — | — | — |
+| `saas` | `POST https://api.bigfix.com/bfproxy/v2/relevance`, JSON envelope `data: {"query": …}` | JSON | email/password (+ TOTP) → session cookies | https, 443 (`login.` → `api.`) |
 
 `server` is normally a bare host. https and the default port are assumed;
 only a different scheme or port is written. A trailing `/api` is stripped
@@ -82,6 +82,43 @@ field differ.
 - http:// is allowed (some Web Reports run plain http) but logged once per
   connection: the password travels in the envelope.
 
+### BigFix SaaS
+
+All **(observed)** on 2026-10-17 (live login, the service's OpenAPI spec, and
+the bigfix-saas MCP server, which makes the same choices).
+
+- `server` is the web UI host (`login.bigfix.com`, `eulogin.bigfix.com`) or the
+  API host; requests go to the API host (`login.` → `api.`, `eulogin.` →
+  `euapi.`). Because the login POST carries the password, only https hosts
+  with those four prefixes are accepted, at config load and in the backend.
+- Every request is a POST of `{"requestId": uuid4, "timestamp": "<epoch ms>",
+  "data": …}`, plus an optional `sid` (`"bf"` + digits, config key `sid`) that
+  selects a BigFix server, with the header `x-bfnow-csrf-protection: 1`.
+  Without the header: `403 "CSRF Protection Header Missing"`. A reused
+  `requestId` is a replay: `409 {"error": "Request conflict"}`. Responses are
+  `{"status", "message", "data"}`; envelope errors carry `data.errorMessage`.
+- Sign-in: `/auth/v1/user/login` with `{email, password[, totp]}`. The
+  session is the `accessToken` / `refreshToken` cookies (HttpOnly, Secure);
+  the body has `iat`/`exp` and the account's servers under `data.pids.bf`.
+  **v1, not v2:** v1 does not register a gateway session (v2 counts against a
+  5-concurrent-session cap, and a v2 login here hung for 30 s).
+- Renewal: `/auth/v1/token/refresh` (no data) before `exp` (lifetime from
+  `exp - iat`, timed on the local clock) or after a 401, then one fresh login
+  if refresh fails. The refresh token appears to be single-use.
+- **Lockout safety:** 100 failed logins lock the account for good, so a
+  rejected login is cached and never sent again by that backend
+  (`authentication` / `login_failed`). Known signals become codes:
+  `totp_required` (answered through the interactive prompt when there is
+  one), `activate_mfa_required`, `password_change_required`, `mfa_mismatch`,
+  `max_concurrent_sessions_reached`.
+- Answers are typed like the REST API's:
+  `{"data": {"answer": [...], "evaltime", "count", "plural", "type"}}` (tuples
+  as nested arrays, times in BigFix format, `evaltime` in ms); relevance errors
+  are `{"data": {"error": "…"}}` with HTTP 200. `/bfproxy/v1/relevance` answers
+  identically.
+- No Explorer extras: `prefilter` takes BigFix's criteria DSL, not relevance
+  strings, so it does not fit `ExplorerExtras`.
+
 ### BigFix Explorer
 
 - **(observed)** While starting, or with no valid connection to its root
@@ -137,7 +174,7 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `http` | other statuses | `service_unavailable` |
 | `response_format` | not the expected JSON/XML (e.g. a login page) | |
 | `unsupported_feature` | Explorer extras on a deployment without Explorer access | |
-| `not_implemented` | the `saas` placeholder | |
+| `not_implemented` | reserved for a backend type that exists in the schema but is not built | |
 
 Relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the
@@ -205,8 +242,9 @@ prompt, else an `authentication` error without any request.
 
 ## Open questions
 
-- **SaaS:** auth and base URL are undocumented publicly; the backend is a
-  placeholder until docs or a test tenant are available.
+- **SaaS:** a tenant with several BigFix servers (`data.pids.bf` lists them)
+  needs one connection per `sid`; enumerating them automatically is not built.
+  Logout on close is not sent (v1 sessions are not counted against the cap).
 - Whether the second URL decode on the no-Explorer path (confirmed live:
   `%xx` only, not `+`) happens in the root server or in the Web Reports it
   forwards to. It does not change what the client must send.

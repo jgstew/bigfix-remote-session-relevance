@@ -12,3 +12,9 @@ reachable Explorer; `rest/captured/via_explorer__*` were taken with one, and
 `rest/captured/forwarded_*` / `explorer/captured/extras_*` are Explorer
 `keys`/`filters` responses. See DESIGN.md § REST API for why both REST
 states are kept.
+
+`saas/captured/*.json` are BigFix SaaS (`api.bigfix.com`) relevance response
+bodies captured through the bigfix-saas MCP server and a live login (deployment
+hash replaced). `saas/shape_login_ok.json` copies the observed login response
+*structure* with synthetic values; the real one carries the session only in
+`accessToken` / `refreshToken` cookies.

@@ -53,6 +53,9 @@ password_env = "BFRSR_PROD_WR_PASSWORD"
 
 [[connections]]
 name = "saas-tenant"
-backend = "saas"                       # reserved; not implemented yet
-server = "<tenant>.example.com"
-enabled = false                        # any connection can be disabled
+backend = "saas"                       # BigFix SaaS
+server = "login.bigfix.com"            # or eulogin.bigfix.com; queries go to api.bigfix.com
+username = "<EMAIL>"
+password_env = "BFRSR_SAAS_PASSWORD"
+# sid = "bf<digits>"                   # only to pick one of several BigFix servers
+# enabled = false                      # any connection can be disabled

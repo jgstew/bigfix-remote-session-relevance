@@ -161,11 +161,7 @@ class AsyncSessionRelevanceClient:
     async def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         """Ask every selected connection for its deployment id (and record it)."""
         self._ensure_backends()
-        targets = [
-            c
-            for c in self._connections
-            if c.backend != "saas" and (force or not self._deployment_ids[c.name])
-        ]
+        targets = [c for c in self._connections if force or not self._deployment_ids[c.name]]
         await self._discover_for(targets)
         self._discovered = True
         return dict(self._deployment_ids)
@@ -200,11 +196,7 @@ class AsyncSessionRelevanceClient:
         async with self._discovery_lock:
             if self._discovered:
                 return
-            missing = [
-                c
-                for c in self._connections
-                if c.backend != "saas" and not self._deployment_ids[c.name]
-            ]
+            missing = [c for c in self._connections if not self._deployment_ids[c.name]]
             await self._discover_for(missing)
             self._discovered = True
 

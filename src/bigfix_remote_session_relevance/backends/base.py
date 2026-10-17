@@ -15,7 +15,7 @@ import ssl
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
 
 import certifi
 import httpx
@@ -275,7 +275,15 @@ class Backend(ABC):
             connect_timeout=conn.connect_timeout or 5.0,
             read_timeout=conn.read_timeout or 120.0,
             transport=transport,
+            **cls._config_kwargs(conn, prompt),
         )
+
+    @classmethod
+    def _config_kwargs(
+        cls, conn: ConnectionConfig, prompt: Callable[[str], str] | None
+    ) -> dict[str, Any]:
+        """Backend-specific constructor arguments taken from the config."""
+        return {}
 
     def __repr__(self) -> str:
         return (

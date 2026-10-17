@@ -1,7 +1,7 @@
 # bigfix-remote-session-relevance
 
 Evaluate BigFix **session relevance** through the root server REST API,
-BigFix Explorer, or the Web Reports SOAP API, against every configured
+BigFix Explorer, the Web Reports SOAP API, or BigFix SaaS, against every configured
 deployment at once, and get the same result back whichever one answered.
 
 ```bash
@@ -28,6 +28,7 @@ The session-relevance counterpart to
   certificate once and it is pinned. A changed certificate is a hard error.
 - **Auth:** Basic or bearer token (11.0.6+ "API key") for REST and Explorer,
   mTLS client certificates for Explorer, username/password for Web Reports.
+  BigFix SaaS signs in with email/password (TOTP prompted when required).
 - **Explorer extras** (`keys`, `filters`) are additive and opt in.
 - **Async first**, with an equally capable sync API. Pure-Python
   dependencies only.

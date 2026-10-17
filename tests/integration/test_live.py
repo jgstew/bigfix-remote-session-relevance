@@ -56,7 +56,7 @@ def _params(backend: str) -> list[Any]:
 
 @pytest.mark.parametrize(
     ("backend", "relevance", "answers", "type_", "plural"),
-    _params("rest") + _params("webreports") + _params("explorer"),
+    _params("rest") + _params("webreports") + _params("explorer") + _params("saas"),
 )
 async def test_live_normalized_results(
     backend: str,
@@ -77,7 +77,7 @@ async def test_live_normalized_results(
     "backend",
     [
         pytest.param(b, marks=getattr(pytest.mark, f"live_{b}"))
-        for b in ("rest", "webreports", "explorer")
+        for b in ("rest", "webreports", "explorer", "saas")
     ],
 )
 async def test_live_relevance_error(backend: str, live_config_path: Path, tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ async def test_live_relevance_error(backend: str, live_config_path: Path, tmp_pa
     "backend",
     [
         pytest.param(b, marks=getattr(pytest.mark, f"live_{b}"))
-        for b in ("rest", "webreports", "explorer")
+        for b in ("rest", "webreports", "explorer", "saas")
     ],
 )
 async def test_live_deployment_id_matches_local_hash(

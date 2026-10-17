@@ -1,0 +1,1 @@
+{"status":200,"message":"Ok","data":{"answer":[[1,"a",true],[2,"b",false]],"evaltime":0.148,"count":2,"plural":true,"type":"( integer, string, boolean )"}}

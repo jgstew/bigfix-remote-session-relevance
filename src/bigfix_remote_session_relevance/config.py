@@ -11,6 +11,7 @@ import configparser
 import contextlib
 import logging
 import os
+import re
 import stat
 import sys
 import tempfile
@@ -24,7 +25,7 @@ import tomlkit.exceptions
 from tomlkit.items import AoT
 
 from .exceptions import ConfigError
-from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server
+from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ DEFAULT_BACKEND_PREFERENCE = ("explorer", "rest", "webreports", "saas")
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_READ_TIMEOUT = 120.0
 DEFAULT_VERIFY: bool | str = "tofu"
+_SID_RE = re.compile(r"^bf\d+$")
 
 _BACKEND_ALIASES = {
     "rest": "rest",
@@ -81,6 +83,7 @@ _KEY_ALIASES = {
     "read_timeout": "read_timeout",
     "timeout": "read_timeout",
     "enabled": "enabled",
+    "sid": "sid",
 }
 
 
@@ -113,6 +116,7 @@ class ConnectionConfig:
     client_key: str | None = None
     client_key_password_env: str | None = None
     deployment_id: str | None = None
+    sid: str | None = None  # BigFix SaaS server id ("bf" + digits); saas only
     verify: bool | str | None = None
     connect_timeout: float | None = None
     read_timeout: float | None = None
@@ -300,6 +304,18 @@ def _validate_auth(conn: ConnectionConfig, where: str) -> None:
         raise ConfigError(f"{where}: client_key needs client_cert")
     if conn.client_cert is not None and address.scheme != "https":
         raise ConfigError(f"{where}: client certificates (mTLS) need https")
+    if conn.backend == "saas":
+        if has_token:
+            raise ConfigError(f"{where}: BigFix SaaS signs in with username/password, not token")
+        try:
+            saas_api_address(address)
+        except ConfigError as exc:
+            raise ConfigError(f"{where}: {exc}") from exc
+    if conn.sid is not None:
+        if conn.backend != "saas":
+            raise ConfigError(f'{where}: sid only applies to backend = "saas"')
+        if not _SID_RE.match(conn.sid):
+            raise ConfigError(f'{where}: sid must be "bf" followed by digits, e.g. bf160001489')
 
 
 def _canonical_backend(value: Any, where: str) -> str:
@@ -498,6 +514,7 @@ def redacted_summary(config: Config) -> list[dict[str, Any]]:
                 "token": _secret_state(c.token, c.token_env),
                 "client_cert": "set" if c.client_cert else "unset",
                 "deployment_id": c.deployment_id,
+                "sid": c.sid,
                 "verify": c.verify
                 if isinstance(c.verify, bool) or c.verify == "tofu"
                 else "ca bundle",

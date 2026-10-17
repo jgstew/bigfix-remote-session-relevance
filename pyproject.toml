@@ -98,6 +98,7 @@ markers = [
   "live_rest: needs a real root server REST API connection in BFRSR_LIVE_CONFIG (or the default config)",
   "live_webreports: needs a real Web Reports connection in BFRSR_LIVE_CONFIG (or the default config)",
   "live_explorer: needs a real BigFix Explorer connection in BFRSR_LIVE_CONFIG (or the default config)",
+  "live_saas: needs a real BigFix SaaS connection in BFRSR_LIVE_CONFIG (or the default config)",
 ]
 
 [tool.coverage.run]

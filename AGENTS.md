@@ -14,7 +14,7 @@ out across every configured deployment. Entry point:
   - `result.py` / `results.py`: the public result contract
   - `backends/`: `base.py` (auth, TLS, error mapping, shared by all),
     `rest.py`, `explorer.py`, `webreports.py`, `explorer_extras.py`,
-    `saas.py` (placeholder), `_parsing.py`, `registry.py`
+    `saas.py` (BigFix SaaS), `_parsing.py`, `registry.py`
   - `client.py` (async fan-out, grouping, failover), `sync.py` (sync facade)
   - `config.py`, `server_address.py`, `deployment.py`, `trust.py` (TOFU)
   - `cli.py`, `render.py`, `setup_wizard.py`, `redact.py`

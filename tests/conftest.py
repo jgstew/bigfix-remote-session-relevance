@@ -30,6 +30,7 @@ _LIVE_MARKERS = {
     "live_rest": "rest",
     "live_webreports": "webreports",
     "live_explorer": "explorer",
+    "live_saas": "saas",
 }
 
 
