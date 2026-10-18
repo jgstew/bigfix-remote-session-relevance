@@ -73,8 +73,23 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
-    for var in ("BFRSR_CONFIG", "BES_ROOT_SERVER", "BES_USER_NAME", "BES_PASSWORD"):
+    for var in (
+        "BFRSR_CONFIG",
+        "BFRSR_LOCAL_ROOT_SERVER",
+        "BES_ROOT_SERVER",
+        "BES_USER_NAME",
+        "BES_PASSWORD",
+    ):
         monkeypatch.delenv(var, raising=False)
+    # Never pick up the machine's own root server credentials (even on one):
+    # point the Linux paths at nothing and take the non-Windows code path.
+    from bigfix_remote_session_relevance import local_root_server
+
+    monkeypatch.setattr(local_root_server, "_IS_WINDOWS", False)
+    monkeypatch.setattr(
+        local_root_server, "CREDENTIALS_FILE", tmp_path / "no-root-server" / "creds"
+    )
+    monkeypatch.setattr(local_root_server, "CRYPTO_UTILITY", tmp_path / "no-root-server" / "crypto")
     return home
 
 

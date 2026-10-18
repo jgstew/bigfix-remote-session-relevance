@@ -56,6 +56,19 @@ backend's default port are assumed.
 Passwords can live in the file, or better, in environment variables named by
 `password_env`.
 
+**On a BigFix root server, no setup is needed.** Run as root (Linux) or
+Administrator (Windows) and the server's own REST API credentials are used
+automatically, as an extra `rest` connection named `local-root-server`, the
+same way besapi logs in first with them. Linux reads
+`/var/opt/BESServer/Applications/MasterOperatorCredentials` and decrypts the
+password with the `CryptoUtility` next to it; Windows reads
+`HKLM\SOFTWARE\Wow6432Node\BigFix\Enterprise Server\MFSConfig` and decrypts
+it with DPAPI. Nothing is written to the config file, and the password never
+appears in output or logs (`--show-config` says `local root server`). As a
+normal user on a root server, or when the password cannot be decrypted, the
+connection is left out when anything else is configured. To turn it off, set `BFRSR_LOCAL_ROOT_SERVER=0` or
+`local_root_server = false` under `[defaults]`.
+
 ## CLI
 
 ```bash

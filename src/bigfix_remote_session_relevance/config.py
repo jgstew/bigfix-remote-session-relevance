@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import configparser
 import contextlib
+import dataclasses
 import logging
 import os
 import re
@@ -24,7 +25,9 @@ import tomlkit
 import tomlkit.exceptions
 from tomlkit.items import AoT
 
+from . import local_root_server
 from .exceptions import ConfigError
+from .local_root_server import LOCAL_ROOT_SERVER
 from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
 
 log = logging.getLogger(__name__)
@@ -36,6 +39,9 @@ DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_READ_TIMEOUT = 120.0
 DEFAULT_VERIFY: bool | str = "tofu"
 _SID_RE = re.compile(r"^bf\d+$")
+# A root server's RESTURL is normally https://localhost:52311/api.
+_LOCAL_SERVER_PLACEHOLDER = "localhost"
+_LOCAL_LABEL = "local root server"
 
 _BACKEND_ALIASES = {
     "rest": "rest",
@@ -84,6 +90,7 @@ _KEY_ALIASES = {
     "timeout": "read_timeout",
     "enabled": "enabled",
     "sid": "sid",
+    "credentials": "credentials",
 }
 
 
@@ -121,6 +128,11 @@ class ConnectionConfig:
     connect_timeout: float | None = None
     read_timeout: float | None = None
     enabled: bool = True
+    # "local_root_server": server, username and password come from this
+    # machine's own root server when the backend is built (local_root_server.py).
+    credentials: str | None = None
+    # Added by load_config, not written in the file: never saved or written back.
+    auto_detected: bool = field(default=False, compare=False)
 
     @property
     def address(self) -> ServerAddress:
@@ -128,7 +140,9 @@ class ConnectionConfig:
 
     @property
     def auth(self) -> str:
-        """``token`` (bearer), ``basic``, or ``mtls`` (client cert only)."""
+        """``token`` (bearer), ``basic``, ``mtls`` (client cert only) or ``local_root_server``."""
+        if self.credentials == LOCAL_ROOT_SERVER:
+            return LOCAL_ROOT_SERVER
         if self.token is not None or self.token_env is not None:
             return "token"
         if self.username is not None:
@@ -183,10 +197,19 @@ class Config:
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
-    """Load and validate the config. A missing file is not an error."""
+    """Load and validate the config. A missing file is not an error.
+
+    On a BigFix root server, its own REST credentials are added as one more
+    connection (see `_with_local_root_server`).
+    """
     resolved = resolve_config_path(path)
     if not resolved.is_file():
-        return _besapi_compat() or Config(path=resolved)
+        return _with_local_root_server(
+            _besapi_compat() or Config(path=resolved),
+            verify=DEFAULT_VERIFY,
+            connect_timeout=DEFAULT_CONNECT_TIMEOUT,
+            read_timeout=DEFAULT_READ_TIMEOUT,
+        )
     try:
         text = resolved.read_text(encoding="utf-8")
     except OSError as exc:
@@ -195,12 +218,14 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         data = tomlkit.parse(text).unwrap()
     except tomlkit.exceptions.ParseError as exc:
         raise ConfigError(f"cannot parse {resolved}: {exc}") from exc
-    config = _from_mapping(data, resolved)
+    config = _from_mapping(data, resolved, local_root=True)
     _warn_if_secrets_readable(resolved, config)
     return config
 
 
-def _from_mapping(data: Mapping[str, Any], path: Path | None) -> Config:
+def _from_mapping(
+    data: Mapping[str, Any], path: Path | None, *, local_root: bool = False
+) -> Config:
     version = data.get("schema_version", SCHEMA_VERSION)
     if version != SCHEMA_VERSION:
         raise ConfigError(f"unsupported schema_version {version!r} (expected {SCHEMA_VERSION})")
@@ -215,6 +240,9 @@ def _from_mapping(data: Mapping[str, Any], path: Path | None) -> Config:
         _canonical_backend(b, "[defaults] backend_preference")
         for b in defaults.get("backend_preference", DEFAULT_BACKEND_PREFERENCE)
     )
+    use_local_root = defaults.get("local_root_server", True)
+    if not isinstance(use_local_root, bool):
+        raise ConfigError("[defaults] local_root_server must be true or false")
 
     raw_connections = data.get("connections", [])
     if not isinstance(raw_connections, list):
@@ -237,12 +265,107 @@ def _from_mapping(data: Mapping[str, Any], path: Path | None) -> Config:
                 read_timeout=default_read if conn.read_timeout is None else conn.read_timeout,
             )
         )
-    return Config(
+    config = Config(
         connections=tuple(connections),
         backend_preference=preference,
         path=path,
         source="file",
     )
+    if not (local_root and use_local_root):
+        return config
+    return _with_local_root_server(
+        config, verify=default_verify, connect_timeout=default_connect, read_timeout=default_read
+    )
+
+
+def _with_local_root_server(
+    config: Config, *, verify: bool | str, connect_timeout: float, read_timeout: float
+) -> Config:
+    """Add this machine's root server as a ``rest`` connection, if it is one.
+
+    Session relevance is read-only, so a root server's own credentials are
+    used without asking (as besapi does). Only presence is checked here; the
+    password is decrypted when the backend is built. Credentials this user
+    cannot read are skipped when anything else is configured (a non-root
+    user on a root server), else kept so the error says to run as root.
+    """
+    if local_root_server.disabled_by_env():
+        return config
+    if any(
+        c.credentials == LOCAL_ROOT_SERVER or c.name == local_root_server.CONNECTION_NAME
+        for c in config.connections
+    ):
+        return config
+    state = local_root_server.detect()
+    if state == "absent":
+        return config
+    if state == "unreadable" and config.enabled_connections():
+        log.info(
+            "this is a BigFix root server, but its REST credentials are readable only by "
+            "root/Administrator; not using them"
+        )
+        return config
+    server = _local_server()
+    conn = ConnectionConfig(
+        name=local_root_server.CONNECTION_NAME,
+        backend="rest",
+        server=server,
+        credentials=LOCAL_ROOT_SERVER,
+        deployment_id=_cached_local_deployment_id(server),
+        verify=verify,
+        connect_timeout=connect_timeout,
+        read_timeout=read_timeout,
+        auto_detected=True,
+    )
+    return dataclasses.replace(config, connections=(*config.connections, conn))
+
+
+def _local_server() -> str:
+    """The root server's RESTURL (read, not decrypted), else localhost.
+
+    Known at load time so --show-config and --trust-cert see the real
+    address; the backend reads it again with the password.
+    """
+    url = local_root_server.rest_url()
+    if url:
+        try:
+            normalize_server(url, "rest")
+        except ConfigError:
+            log.warning("ignoring the local root server's unusable RESTURL")
+        else:
+            return url
+    return _LOCAL_SERVER_PLACEHOLDER
+
+
+# The automatic connection is not in the config file, so its discovered
+# deployment id is kept here, with the server it belongs to.
+
+
+def local_deployment_cache_path() -> Path:
+    return Path.home() / ".bigfix" / ".remote_session_local_root_server.toml"
+
+
+def _cached_local_deployment_id(server: str) -> str | None:
+    path = local_deployment_cache_path()
+    try:
+        data = tomlkit.parse(path.read_text(encoding="utf-8")).unwrap()
+    except (OSError, tomlkit.exceptions.ParseError):
+        return None
+    deployment_id = data.get("deployment_id")
+    try:
+        same = normalize_server(str(data.get("server")), "rest") == normalize_server(server, "rest")
+    except ConfigError:
+        return None
+    return deployment_id if same and isinstance(deployment_id, str) else None
+
+
+def record_local_deployment_id(server: str, deployment_id: str) -> None:
+    """Remember the automatic local root server connection's deployment id."""
+    doc = tomlkit.document()
+    doc.add(tomlkit.comment("bigfix-remote-session-relevance: the local root server's deployment"))
+    doc.add("server", server)
+    doc.add("deployment_id", deployment_id)
+    _atomic_write(local_deployment_cache_path(), tomlkit.dumps(doc))
 
 
 def _connection_from_mapping(raw: Any, index: int) -> ConnectionConfig:
@@ -264,6 +387,14 @@ def _connection_from_mapping(raw: Any, index: int) -> ConnectionConfig:
     if "backend" not in values:
         raise ConfigError(f"{where}: missing backend")
     backend = _canonical_backend(values["backend"], where)
+    if "credentials" in values:
+        values["credentials"] = _validate_credentials(values["credentials"], where)
+        if "server" in values:
+            raise ConfigError(
+                f'{where}: credentials = "{LOCAL_ROOT_SERVER}" uses the root server\'s own '
+                "RESTURL; remove server"
+            )
+        values["server"] = _local_server()
     server = values.get("server")
     if not isinstance(server, str) or not server.strip():
         raise ConfigError(f"{where}: missing server")
@@ -287,6 +418,12 @@ def _connection_from_mapping(raw: Any, index: int) -> ConnectionConfig:
     return conn
 
 
+def _validate_credentials(value: Any, where: str) -> str:
+    if str(value).strip().lower().replace("-", "_") != LOCAL_ROOT_SERVER:
+        raise ConfigError(f'{where}: credentials must be "{LOCAL_ROOT_SERVER}"')
+    return LOCAL_ROOT_SERVER
+
+
 def _validate_auth(conn: ConnectionConfig, where: str) -> None:
     try:
         address = conn.address
@@ -296,6 +433,16 @@ def _validate_auth(conn: ConnectionConfig, where: str) -> None:
     has_basic = (
         conn.username is not None or conn.password is not None or conn.password_env is not None
     )
+    if conn.credentials == LOCAL_ROOT_SERVER:
+        if conn.backend != "rest":
+            raise ConfigError(
+                f'{where}: credentials = "{LOCAL_ROOT_SERVER}" needs backend = "rest"'
+            )
+        if has_token or has_basic or conn.client_cert is not None:
+            raise ConfigError(
+                f'{where}: credentials = "{LOCAL_ROOT_SERVER}" supplies the username and '
+                "password; remove the other credentials"
+            )
     if has_token and conn.backend == "webreports":
         raise ConfigError(f"{where}: Web Reports SOAP only supports username/password, not token")
     if has_token and has_basic:
@@ -405,7 +552,7 @@ def _besapi_compat() -> Config | None:
 
 # -- writing ------------------------------------------------------------------
 
-_SAVE_ORDER = [f.name for f in fields(ConnectionConfig)]
+_SAVE_ORDER = [f.name for f in fields(ConnectionConfig) if f.name != "auto_detected"]
 
 
 def save_connection(
@@ -420,6 +567,8 @@ def save_connection(
         value = getattr(conn, key)
         if value is None or (key == "enabled" and value is True):
             continue
+        if key == "server" and conn.credentials == LOCAL_ROOT_SERVER:
+            continue  # RESTURL, read from the root server
         table.add(key, value)
 
     for index, existing in enumerate(connections):
@@ -503,14 +652,15 @@ def redacted_summary(config: Config) -> list[dict[str, Any]]:
             server = c.address.base_url
         except ConfigError as exc:
             server = f"<invalid: {exc}>"
+        local = c.credentials == LOCAL_ROOT_SERVER
         rows.append(
             {
                 "name": c.name,
                 "backend": c.backend,
                 "server": server,
                 "auth": c.auth,
-                "username": "set" if c.username else "unset",
-                "password": _secret_state(c.password, c.password_env),
+                "username": _LOCAL_LABEL if local else "set" if c.username else "unset",
+                "password": _LOCAL_LABEL if local else _secret_state(c.password, c.password_env),
                 "token": _secret_state(c.token, c.token_env),
                 "client_cert": "set" if c.client_cert else "unset",
                 "deployment_id": c.deployment_id,
@@ -538,6 +688,8 @@ __all__ = [
     "ConnectionConfig",
     "default_config_path",
     "load_config",
+    "local_deployment_cache_path",
+    "record_local_deployment_id",
     "redacted_summary",
     "resolve_config_path",
     "save_connection",

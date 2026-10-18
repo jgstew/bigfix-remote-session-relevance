@@ -16,7 +16,8 @@ out across every configured deployment. Entry point:
     `rest.py`, `explorer.py`, `webreports.py`, `explorer_extras.py`,
     `saas.py` (BigFix SaaS), `_parsing.py`, `registry.py`
   - `client.py` (async fan-out, grouping, failover), `sync.py` (sync facade)
-  - `config.py`, `server_address.py`, `deployment.py`, `trust.py` (TOFU)
+  - `config.py`, `server_address.py`, `deployment.py`, `trust.py` (TOFU),
+    `local_root_server.py` (a root server's own REST credentials)
   - `cli.py`, `render.py`, `setup_wizard.py`, `redact.py`
 - `tests/unit/`: offline; `tests/integration/`: live, opt-in
 - `tests/fixtures/*/captured/`: real, redacted server responses (ground truth)

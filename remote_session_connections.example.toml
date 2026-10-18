@@ -14,6 +14,9 @@ read_timeout = 120
 verify = "tofu"             # "tofu" (default) | true | false | "/path/to/ca-bundle.pem"
 # Order used to pick one connection per deployment:
 backend_preference = ["explorer", "rest", "webreports", "saas"]
+# On a BigFix root server, its own REST credentials are used automatically
+# (connection "local-root-server"); false turns that off.
+# local_root_server = true
 
 [[connections]]
 name = "prod-root"                     # unique; display name and --connection value
@@ -60,3 +63,12 @@ password_env = "BFRSR_SAAS_PASSWORD"
 # sid = "bf<digits>"                   # only to pick one of several BigFix servers
 verify = true                          # CA-signed service: no trust on first use
 # enabled = false                      # any connection can be disabled
+
+# Only to name or tune the automatic local root server connection: run on a
+# root server, it logs in with the server's own REST credentials (Linux:
+# MasterOperatorCredentials + CryptoUtility, as root; Windows: the registry +
+# DPAPI, as Administrator). No server, username or password here.
+# [[connections]]
+# name = "this-root"
+# backend = "rest"
+# credentials = "local_root_server"

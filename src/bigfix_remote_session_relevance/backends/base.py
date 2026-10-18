@@ -8,6 +8,7 @@ transport failures to `ResultError`, and stamping result metadata.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -21,6 +22,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
 import certifi
 import httpx
 
+from .. import local_root_server
+from ..exceptions import ConfigError
 from ..result import ResultError, SessionRelevanceResult
 from ..server_address import ServerAddress, normalize_server
 
@@ -221,6 +224,7 @@ class Backend(ABC):
         read_timeout: float = 120.0,
         retries: int = 1,
         transport: httpx.AsyncBaseTransport | None = None,
+        local_root_server: bool = False,
     ) -> None:
         self.address = (
             server if isinstance(server, ServerAddress) else normalize_server(server, self.name)
@@ -239,6 +243,11 @@ class Backend(ABC):
         self.retries = retries
         self._transport = transport
         self._client: httpx.AsyncClient | None = None
+        # The local root server's own credentials replace address, username
+        # and password on first use (see resolve_credentials).
+        self._credentials_resolved = not local_root_server
+        self._credentials_problem: ResultError | None = None
+        self._credentials_lock: asyncio.Lock | None = None
         if self.address.scheme == "http":
             log.warning(
                 "%s (%s): http:// sends credentials in cleartext; prefer https",
@@ -276,6 +285,7 @@ class Backend(ABC):
             connect_timeout=conn.connect_timeout or 5.0,
             read_timeout=conn.read_timeout or 120.0,
             transport=transport,
+            local_root_server=conn.credentials == local_root_server.LOCAL_ROOT_SERVER,
             **cls._config_kwargs(conn, prompt),
         )
 
@@ -328,6 +338,43 @@ class Backend(ABC):
     async def _evaluate(
         self, client: httpx.AsyncClient, relevance: str
     ) -> SessionRelevanceResult: ...
+
+    async def resolve_credentials(self) -> ResultError | None:
+        """Read the local root server credentials, once; the error if they failed.
+
+        Done on first use rather than when built, and in a thread: decrypting
+        runs CryptoUtility (Linux) and must not block the event loop.
+        """
+        if self._credentials_resolved:
+            return self._credentials_problem
+        if self._credentials_lock is None:
+            self._credentials_lock = asyncio.Lock()
+        async with self._credentials_lock:
+            if not self._credentials_resolved:
+                self._credentials_problem = await asyncio.to_thread(self._apply_local_credentials)
+                self._credentials_resolved = True
+        return self._credentials_problem
+
+    def _apply_local_credentials(self) -> ResultError | None:
+        try:
+            creds = local_root_server.read_credentials()
+            address = normalize_server(creds.server, self.name)
+        except local_root_server.LocalRootServerError as exc:
+            return self._local_credentials_error(exc.code, str(exc))
+        except ConfigError as exc:
+            return self._local_credentials_error(
+                "local_credentials_incomplete", f"RESTURL is not usable: {exc}"
+            )
+        self.address, self.username, self._password = address, creds.username, creds.password
+        return None
+
+    def _local_credentials_error(self, code: str, message: str) -> ResultError:
+        return ResultError(
+            kind="authentication",
+            code=code,
+            backend=self.name,
+            message=f"local root server credentials: {message}",
+        )
 
     # -- machinery shared by every backend -------------------------------------------
 
@@ -411,7 +458,7 @@ class Backend(ABC):
         )
 
     async def _run_with_trust(self, relevance: str, operation: Operation) -> SessionRelevanceResult:
-        problem = self._auth_problem()
+        problem = await self.resolve_credentials() or self._auth_problem()
         if problem is not None:
             return SessionRelevanceResult.failure(relevance, problem)
         for attempt in range(2):

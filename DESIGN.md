@@ -202,7 +202,7 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `kind` | When | `code` examples |
 |---|---|---|
 | `relevance` | the server evaluated it and said no | |
-| `authentication` | credentials rejected (message `credentials rejected`), or accepted but missing a privilege | `permission_denied` |
+| `authentication` | credentials rejected (message `credentials rejected`), or accepted but missing a privilege, or the local root server credentials are unavailable | `permission_denied`, `local_credentials_absent`, `local_credentials_unreadable`, `local_credentials_decrypt_failed`, `local_credentials_incomplete` |
 | `connection`, `timeout` | unreachable | |
 | `tls` | certificate problems | `cert_verify_failed`, `untrusted`, `pin_mismatch`, `pinned_cert_invalid`, `client_cert`, `tls_handshake` |
 | `http` | other statuses | `service_unavailable` |
@@ -283,12 +283,65 @@ Read and written with tomlkit. Lenient aliases (`url`/`host`, `type`, `user`,
 `api_key`…) because people write these by hand; unknown keys are warned about,
 not fatal. Validation rejects: duplicate names, unknown backends, bad servers,
 token *and* basic together, a token on Web Reports, `client_key` without
-`client_cert`, mTLS over http. With no config file, besapi's `BES_ROOT_SERVER` /
+`client_cert`, mTLS over http, `credentials = "local_root_server"` on anything
+but `rest` or alongside other credentials. With no config file, besapi's `BES_ROOT_SERVER` /
 `BES_USER_NAME` / `BES_PASSWORD` or `~/.besapi.conf` become one `rest`
 connection.
 
 Password resolution: `password_env`, then `password`, then an interactive
 prompt, else an `authentication` error without any request.
+
+### Local root server credentials
+
+On a BigFix root server, `load_config` adds one more `rest` connection,
+`local-root-server`, with `credentials = "local_root_server"`: its server,
+username and password are the server's own REST API credentials
+(`local_root_server.py`, a minimal reimplementation of besapi's
+`plugin_utilities_linux` / `plugin_utilities_win`). Session relevance is
+read-only, so these are used without opting in, as besapi does.
+
+- **Linux:** `/var/opt/BESServer/Applications/MasterOperatorCredentials`, a
+  header-less `Key=Value` file (each line stripped, split on the first `=`,
+  key case kept) with `RESTUsername`, `RESTPassword={aes,1}…` and
+  `RESTURL=https://localhost:52311/api`. Normally readable by root only.
+  The password is `CryptoUtility -d -i <value>` (argv list, no shell, 30 s
+  timeout), stripped stdout.
+- **Windows:** `HKLM\SOFTWARE\Wow6432Node\BigFix\Enterprise Server\MFSConfig`
+  (`RESTUsername`, `RESTURL`, `RESTPassword`) via `winreg`. The password is
+  `{obf}` + base64 of a machine-scope DPAPI blob, decrypted with
+  `CryptUnprotectData` (flags 4) through ctypes, so there is no pywin32
+  dependency.
+- A trailing `/api` is dropped from `RESTURL`. A decrypted password of 3
+  characters or fewer counts as a failed decryption (as in besapi).
+- `load_config` checks presence (file exists and is readable / the registry
+  key opens) and reads `RESTURL` as the connection's `server`, so
+  `--show-config` and `--trust-cert` see the real address; it never
+  decrypts. If the credentials exist but this user cannot read them, the
+  connection is skipped (logged at INFO) when anything else is configured,
+  and kept otherwise so the error explains what to do.
+- The password is decrypted on the backend's first query, once, in a thread
+  (`asyncio.to_thread`): CryptoUtility may take seconds and must not block
+  the event loop. If that fails and other connections are selected, the
+  client leaves the automatic connection out (logged at WARNING) instead of
+  turning every run partial; alone, or written in the file, its error is
+  returned.
+- Every failure is an `authentication` result, sent without any request,
+  with a `code`: `local_credentials_absent` (not a root server),
+  `local_credentials_unreadable` (run as root / Administrator),
+  `local_credentials_decrypt_failed` (CryptoUtility or DPAPI failed),
+  `local_credentials_incomplete` (a value is missing or `RESTURL` is unusable).
+  The plaintext and CryptoUtility's output are never logged or put in a
+  message.
+- Not added when `BFRSR_LOCAL_ROOT_SERVER` is `0`/`false`/`no`/`off`, when
+  `[defaults] local_root_server = false`, or when the file already has a
+  connection with `credentials = "local_root_server"` (to name or tune it;
+  only `backend = "rest"`, with no other credentials) or named
+  `local-root-server`. Such a connection takes no `server`, `username`,
+  `password` or token: `RESTURL` decides where the credentials go. The
+  automatic connection is never written to the file; its discovered
+  deployment id is kept, with its server, in
+  `~/.bigfix/.remote_session_local_root_server.toml` (0600) and reused only
+  for that server.
 
 ## Open questions
 

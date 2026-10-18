@@ -26,7 +26,13 @@ from .backends.base import Backend, TrustPolicy
 from .backends.explorer_extras import explorer_body, supports_explorer_extras
 from .backends.registry import BACKEND_CLASSES, backend_from_config
 from .backends.saas import SaasBackend, SaasSessionPool
-from .config import Config, ConnectionConfig, load_config, set_deployment_id
+from .config import (
+    Config,
+    ConnectionConfig,
+    load_config,
+    record_local_deployment_id,
+    set_deployment_id,
+)
 from .deployment import discover_deployment_id, group_key
 from .exceptions import ConfigError
 from .result import ResultError, SessionRelevanceResult
@@ -117,6 +123,7 @@ class AsyncSessionRelevanceClient:
         self._saas_sessions = SaasSessionPool()
         self._preferred: dict[str, str] = {}
         self._discovered = False
+        self._local_settled = False
         self._discovery_lock: asyncio.Lock | None = None
         self._semaphore: asyncio.Semaphore | None = None
 
@@ -187,7 +194,10 @@ class AsyncSessionRelevanceClient:
     def result_count(self) -> int | None:
         """How many results an evaluation returns: one per deployment, or per
         connection in ``all`` mode. ``None`` while that still depends on
-        deployment ids not discovered yet (the first evaluation finds them)."""
+        deployment ids not discovered yet (the first evaluation finds them),
+        or on whether the automatic local root server connection works."""
+        if not self._local_settled and self._droppable_local():
+            return None
         if self.mode == "all":
             return len(self._connections)
         if self._discovery_pending():
@@ -197,6 +207,7 @@ class AsyncSessionRelevanceClient:
     async def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         """Ask every selected connection for its deployment id (and record it)."""
         self._ensure_backends()
+        await self._settle_local_credentials()
         targets = [c for c in self._connections if force or not self._deployment_ids[c.name]]
         await self._discover_for(targets)
         self._discovered = True
@@ -217,6 +228,24 @@ class AsyncSessionRelevanceClient:
                 if isinstance(backend, SaasBackend):
                     self._saas_sessions.attach(backend)
                 self._backends[conn.name] = backend
+
+    def _droppable_local(self) -> list[ConnectionConfig]:
+        """Automatic local root server connections, when something else is selected."""
+        auto = [c for c in self._connections if c.auto_detected]
+        return auto if len(auto) < len(self._connections) else []
+
+    async def _settle_local_credentials(self) -> None:
+        # The automatic connection is an extra: if its credentials cannot be
+        # read, leave it out rather than turn every run partial (exit 3).
+        # Alone, it stays, so its error says what to do.
+        if self._local_settled:
+            return
+        for conn in self._droppable_local():
+            problem = await self._backends[conn.name].resolve_credentials()
+            if problem is not None and conn in self._connections:
+                log.warning("%s: not used: %s", conn.name, problem.message)
+                self._connections.remove(conn)
+        self._local_settled = True
 
     async def _limited(
         self, awaitable: Awaitable[SessionRelevanceResult]
@@ -266,7 +295,20 @@ class AsyncSessionRelevanceClient:
 
     def _record(self, conn: ConnectionConfig, deployment_id: str) -> None:
         path = self.config.path
-        if not self.record_deployment_ids or path is None or self.config.source != "file":
+        if conn.auto_detected and self.record_deployment_ids:
+            # Not in the config file: cached next to it instead.
+            server = self._backends[conn.name].address.base_url
+            try:
+                record_local_deployment_id(server, deployment_id)
+            except OSError as exc:
+                log.warning("%s: could not cache deployment_id: %s", conn.name, exc)
+            return
+        if (
+            not self.record_deployment_ids
+            or path is None
+            or self.config.source != "file"
+            or conn.auto_detected
+        ):
             return
         if conn.deployment_id == deployment_id:
             return
@@ -340,6 +382,7 @@ class AsyncSessionRelevanceClient:
         unreachable, undiscovered server does not hold up the rest.
         """
         self._ensure_backends()
+        await self._settle_local_credentials()
         finished: asyncio.Queue[asyncio.Future[SessionRelevanceResult | None]] = asyncio.Queue()
         running: set[asyncio.Future[SessionRelevanceResult | None]] = set()
         helpers: list[asyncio.Future[None]] = []
