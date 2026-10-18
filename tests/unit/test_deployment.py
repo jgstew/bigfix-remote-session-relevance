@@ -7,7 +7,7 @@ import httpx
 from bigfix_remote_session_relevance.backends.rest import RestBackend
 from bigfix_remote_session_relevance.backends.webreports import WebReportsBackend
 from bigfix_remote_session_relevance.deployment import (
-    DEPLOYMENT_ID_RELEVANCE,
+    DEPLOYMENT_ID_SESSION_RELEVANCE,
     GATHER_URL_RELEVANCE,
     deployment_id_from_hashes,
     discover_deployment_id,
@@ -19,7 +19,7 @@ HASH = hashlib.sha256(GATHER.encode()).hexdigest()
 
 
 def test_relevance_is_the_designed_query() -> None:
-    assert DEPLOYMENT_ID_RELEVANCE == "sha256 of gather url of bes license"
+    assert DEPLOYMENT_ID_SESSION_RELEVANCE == "sha256 of gather url of bes license"
     assert GATHER_URL_RELEVANCE == "gather url of bes license"
 
 

@@ -107,7 +107,12 @@ class HumanRenderer:
 def format_error(r: SessionRelevanceResult) -> str:
     """The one-line stderr form of a failed result."""
     kind, message = (r.error.kind, r.error.message) if r.error else ("unknown", "")
-    return f"{r.connection}: {kind} error: {message}"
+    return f"{r.connection}: {_kind_label(kind)} error: {message}"
+
+
+def _kind_label(kind: str) -> str:
+    # Kinds are identifiers for --json; people read "session relevance error".
+    return kind.replace("_", " ")
 
 
 # Long enough for a typical error message, short enough that the recap stays
@@ -125,7 +130,9 @@ def _summary_key(r: SessionRelevanceResult) -> tuple[object, ...]:
 def _summary_answer(r: SessionRelevanceResult) -> str:
     """One line standing for a group's shared answer."""
     if r.error is not None:
-        text = f"!! {r.error.kind}: {' '.join(without_attempts(r.error.message).split())}"
+        text = (
+            f"!! {_kind_label(r.error.kind)}: {' '.join(without_attempts(r.error.message).split())}"
+        )
     else:
         text = " | ".join(r.answer_strings) or "(no answers)"
     if len(text) > _SUMMARY_ANSWER_CHARS:
@@ -168,7 +175,7 @@ def _unreachable(r: SessionRelevanceResult) -> bool:
 def exit_code(results: SessionRelevanceResults) -> int:
     if not results:
         return EXIT_USAGE
-    if any(r.error is not None and r.error.kind == "relevance" for r in results):
+    if any(r.error is not None and r.error.kind == "session_relevance" for r in results):
         return EXIT_RELEVANCE_ERROR
     if all(r.ok for r in results):
         return EXIT_OK

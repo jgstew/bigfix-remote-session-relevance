@@ -35,7 +35,7 @@ from typing import Any
 import httpx
 
 from ..result import SessionRelevanceResult
-from ._parsing import parse_relevance_response
+from ._parsing import parse_session_relevance_response
 from .base import Backend
 from .explorer_extras import explorer_body
 
@@ -46,12 +46,12 @@ _NO_EXPLORER_RE = re.compile(r"no reachable BigFix Explorer", re.IGNORECASE)
 _DISALLOWED_RE = re.compile(r"character which is not allowed", re.IGNORECASE)
 
 
-def encode_relevance(relevance: str) -> str:
+def encode_session_relevance(session_relevance: str) -> str:
     # Without Explorer the server URL-decodes the query twice, so quote it here
     # and let the form encoding quote it again; otherwise escapes such as %22
     # inside the relevance are decoded too early. Same as
     # besapi.session_relevance_xml.
-    return urllib.parse.quote(relevance, safe=":+")
+    return urllib.parse.quote(session_relevance, safe=":+")
 
 
 class RestBackend(Backend):
@@ -61,30 +61,32 @@ class RestBackend(Backend):
         super().__init__(server, **kwargs)
         self._form_until = 0.0  # monotonic deadline for the no-Explorer fallback
 
-    async def _evaluate(self, client: httpx.AsyncClient, relevance: str) -> SessionRelevanceResult:
+    async def _evaluate(
+        self, client: httpx.AsyncClient, session_relevance: str
+    ) -> SessionRelevanceResult:
         if time.monotonic() >= self._form_until:
-            response = await self._post_json(client, {"relevance": relevance})
+            response = await self._post_json(client, {"relevance": session_relevance})
             if not _no_explorer(response):
-                return parse_relevance_response(relevance, response, self.name)
+                return parse_session_relevance_response(session_relevance, response, self.name)
             self._form_until = time.monotonic() + EXPLORER_RECHECK_SECONDS
         response = await client.post(
             "/api/query",
-            data={"relevance": encode_relevance(relevance), "output": "json"},
+            data={"relevance": encode_session_relevance(session_relevance), "output": "json"},
         )
-        result = parse_relevance_response(relevance, response, self.name)
+        result = parse_session_relevance_response(session_relevance, response, self.name)
         if result.error is not None and _DISALLOWED_RE.search(result.error.message):
             # If Explorer came back during the fallback, the double-quoted form
             # now fails every query this way. One JSON retry tells the two
             # apart: a 503 means Explorer is still down and the error is real.
-            retry = await self._post_json(client, {"relevance": relevance})
+            retry = await self._post_json(client, {"relevance": session_relevance})
             if not _no_explorer(retry):
                 self._form_until = 0.0
-                return parse_relevance_response(relevance, retry, self.name)
+                return parse_session_relevance_response(session_relevance, retry, self.name)
         return result
 
     async def evaluate_explorer(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
@@ -94,13 +96,13 @@ class RestBackend(Backend):
         There is no fallback here: without a reachable Explorer the server
         answers 503 (reported as ``http`` / ``service_unavailable``).
         """
-        body = explorer_body(relevance, keys, filters)
+        body = explorer_body(session_relevance, keys, filters)
 
         async def _op(client: httpx.AsyncClient) -> SessionRelevanceResult:
             response = await self._post_json(client, body)
-            return parse_relevance_response(relevance, response, self.name)
+            return parse_session_relevance_response(session_relevance, response, self.name)
 
-        return await self._run(relevance, _op)
+        return await self._run(session_relevance, _op)
 
     async def _post_json(self, client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
         return await client.post(

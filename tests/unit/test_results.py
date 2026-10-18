@@ -28,7 +28,7 @@ def test_sequence_behaviour() -> None:
 
 def test_partitions() -> None:
     results = SessionRelevanceResults(
-        [_ok("a"), _bad("b", "connection"), _bad("c", "timeout"), _bad("d", "relevance")]
+        [_ok("a"), _bad("b", "connection"), _bad("c", "timeout"), _bad("d", "session_relevance")]
     )
     assert not results.ok
     assert [r.connection for r in results.successful] == ["a"]

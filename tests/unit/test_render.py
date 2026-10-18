@@ -48,9 +48,9 @@ def test_multiple_results_get_headers() -> None:
 
 
 def test_errors_go_to_stderr() -> None:
-    out, err = _render([_bad("a", "relevance", 'The operator "foo" is not defined.')])
+    out, err = _render([_bad("a", "session_relevance", 'The operator "foo" is not defined.')])
     assert out == ""
-    assert 'a: relevance error: The operator "foo" is not defined.' in err
+    assert 'a: session relevance error: The operator "foo" is not defined.' in err
 
 
 def test_unreachable_hidden_unless_verbose() -> None:
@@ -74,7 +74,7 @@ def test_verbose_metadata_on_stderr() -> None:
 def test_exit_codes() -> None:
     S = SessionRelevanceResults
     assert exit_code(S([_ok("a", [1])])) == 0
-    assert exit_code(S([_ok("a", [1]), _bad("b", "relevance")])) == 1
+    assert exit_code(S([_ok("a", [1]), _bad("b", "session_relevance")])) == 1
     assert exit_code(S([_bad("a", "connection"), _bad("b", "authentication")])) == 2
     assert exit_code(S([_ok("a", [1]), _bad("b", "connection")])) == 3
     assert exit_code(S([])) == 64
@@ -85,8 +85,8 @@ def test_streaming_renderer_writes_each_result_as_it_arrives() -> None:
     renderer = HumanRenderer(out=out, err=err, labelled=True)
     renderer.add(_ok("b", ["2"]))
     assert out.getvalue() == "== b (rest) ==\n2\n"
-    renderer.add(_bad("c", "relevance", "nope"))
-    assert err.getvalue() == "c: relevance error: nope\n"
+    renderer.add(_bad("c", "session_relevance", "nope"))
+    assert err.getvalue() == "c: session relevance error: nope\n"
     renderer.add(_ok("a", ["1"]))
     assert out.getvalue() == "== b (rest) ==\n2\n== a (rest) ==\n1\n"
     renderer.close()
@@ -109,15 +109,15 @@ def test_summary_collapses_identical_answers_majority_first() -> None:
             _ok("a", ["1"]),
             _ok("b", ["2", "3"]),
             _ok("c", ["2", "3"]),
-            _bad("d", "relevance", "nope"),
-            _bad("e", "relevance", "nope"),
-            _bad("f", "relevance", "nope"),
+            _bad("d", "session_relevance", "nope"),
+            _bad("e", "session_relevance", "nope"),
+            _bad("f", "session_relevance", "nope"),
         ]
     )
     summary = out.split("\n\n", 1)[1]
     assert summary == (
         "== summary: 6 results, 3 distinct answers\n"
-        "3× !! relevance: nope\n"
+        "3× !! session relevance: nope\n"
         "    d (rest), e (rest), f (rest)\n"
         "2× 2 | 3\n"
         "    b (rest), c (rest)\n"
@@ -174,4 +174,6 @@ def test_summary_collapses_errors_that_differ_only_in_connections_tried() -> Non
 
 
 def test_format_error() -> None:
-    assert format_error(_bad("a", "relevance", "nope")) == "a: relevance error: nope"
+    assert (
+        format_error(_bad("a", "session_relevance", "nope")) == "a: session relevance error: nope"
+    )

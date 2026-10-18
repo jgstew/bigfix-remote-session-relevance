@@ -23,8 +23,8 @@ class SessionRelevanceError(Exception):
         self.result = result
 
 
-class RelevanceError(SessionRelevanceError):
-    """The server evaluated the relevance and reported an error."""
+class SessionRelevanceEvaluationError(SessionRelevanceError):
+    """The server evaluated the session relevance and reported an error."""
 
 
 class AuthenticationError(SessionRelevanceError):
@@ -64,7 +64,7 @@ class ConfigError(SessionRelevanceError):
 
 
 EXCEPTION_FOR_KIND: dict[str, type[SessionRelevanceError]] = {
-    "relevance": RelevanceError,
+    "session_relevance": SessionRelevanceEvaluationError,
     "authentication": AuthenticationError,
     "connection": BackendConnectionError,
     "timeout": BackendTimeoutError,

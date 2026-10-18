@@ -172,7 +172,7 @@ the bigfix-saas MCP server, which makes the same choices).
 - **(observed)** `keys` is written in braces, `{id name {label flag}}`, and
   nests objects. A filter must *return a set*, e.g. `{"computers": "set of (bes
   computers whose (…))"}`. Otherwise the result is `400 {"error": "Filter
-  \"computers\": …"}`, reported as a `relevance` error.
+  \"computers\": …"}`, reported as a `session_relevance` error.
 - mTLS: no public documentation was found; the client certificate is loaded
   into the TLS context (`client_cert`, `client_key`,
   `client_key_password_env`) and works with or without Basic auth.
@@ -183,9 +183,16 @@ the bigfix-saas MCP server, which makes the same choices).
 `test_result_has_every_designed_field`; adding a field means updating that
 test, `to_dict()` and this section.
 
+Names always say *session* relevance: the field, the `to_dict()` key, the
+`session_relevance` / `session_relevances` parameters of every `evaluate*`
+method and the error kind. Client relevance is a different dialect
+(bigfix-remote-client-relevance says `client_relevance`), so the public API
+never uses a bare `relevance`. Wire bodies keep the server's own `relevance`
+key.
+
 | Field | Meaning |
 |---|---|
-| `relevance` | the query |
+| `session_relevance` | the query |
 | `answers` | native values, coerced by `type`: `integer`→`int`, `boolean`→`bool`, tuples→`tuple`, otherwise `str`; `dict` only from Explorer `keys` |
 | `answer_strings` | BigFix-style strings; tuples joined with `", "` |
 | `type`, `plural`, `evaluation_time_ms` | as reported by the server (`None` if unknown) |
@@ -197,11 +204,12 @@ test, `to_dict()` and this section.
 ### Errors
 
 Per-query failures are results, never exceptions. `raise_for_error()` (or
-`raise_errors=True`) converts them to one exception class per kind.
+`raise_errors=True`) converts them to one exception class per kind
+(`session_relevance` raises `SessionRelevanceEvaluationError`).
 
 | `kind` | When | `code` examples |
 |---|---|---|
-| `relevance` | the server evaluated it and said no | |
+| `session_relevance` | the server evaluated it and said no | |
 | `authentication` | credentials rejected (message `credentials rejected`), or accepted but missing a privilege, or the local root server credentials are unavailable | `permission_denied`, `local_credentials_absent`, `local_credentials_unreadable`, `local_credentials_decrypt_failed`, `local_credentials_incomplete` |
 | `connection`, `timeout` | unreachable | |
 | `tls` | certificate problems | `cert_verify_failed`, `untrusted`, `pin_mismatch`, `pinned_cert_invalid`, `client_cert`, `tls_handshake` |
@@ -210,7 +218,7 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `unsupported_feature` | Explorer extras on a deployment without Explorer access | |
 | `not_implemented` | reserved for a backend type that exists in the schema but is not built | |
 
-Relevance error messages are normalized (`Error:` prefixes, whitespace) so
+Session relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the
 server's text.
 
@@ -228,7 +236,8 @@ server's text.
   connections are tried in `backend_preference` order (explorer, rest,
   webreports), then config order, and the first that works stays first.
 - Failover happens on `connection`, `timeout`, `tls`, `authentication`,
-  `http`, `response_format` and `not_implemented`. **Never** on `relevance`
+  `http`, `response_format` and `not_implemented`. **Never** on
+  `session_relevance`
   (the query would fail everywhere) and **never** on `pin_mismatch` /
   `pinned_cert_invalid` (a possible impostor is a security signal, not an
   outage). A group where everything failed returns one result, preferring a

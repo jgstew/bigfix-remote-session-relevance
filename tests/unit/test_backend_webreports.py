@@ -164,7 +164,7 @@ async def test_relevance_fault(recording_transport: type) -> None:
     async with _backend(rec) as backend:
         result = await backend.evaluate("foo")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == 'The operator "foo" is not defined.'
 
 

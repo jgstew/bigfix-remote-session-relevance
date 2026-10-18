@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from xml.etree.ElementTree import Element
 
 ERROR_KINDS: tuple[str, ...] = (
-    "relevance",
+    "session_relevance",
     "authentication",
     "connection",
     "timeout",
@@ -119,7 +119,7 @@ class RawResponse:
 class SessionRelevanceResult:
     """The result of one session relevance query against one connection."""
 
-    relevance: str
+    session_relevance: str
     answers: tuple[Any, ...] = ()
     answer_strings: tuple[str, ...] = ()
     type: str | None = None
@@ -138,7 +138,7 @@ class SessionRelevanceResult:
     @classmethod
     def from_values(
         cls,
-        relevance: str,
+        session_relevance: str,
         values: Iterable[Any],
         *,
         type: str | None = None,
@@ -148,7 +148,7 @@ class SessionRelevanceResult:
         node = parse_type(type)
         answers = tuple(coerce(v, node) for v in values)
         return cls(
-            relevance=relevance,
+            session_relevance=session_relevance,
             answers=answers,
             answer_strings=tuple(answer_string(a) for a in answers),
             type=type,
@@ -156,8 +156,10 @@ class SessionRelevanceResult:
         )
 
     @classmethod
-    def failure(cls, relevance: str, error: ResultError, **kwargs: Any) -> SessionRelevanceResult:
-        return cls(relevance=relevance, error=error, **kwargs)
+    def failure(
+        cls, session_relevance: str, error: ResultError, **kwargs: Any
+    ) -> SessionRelevanceResult:
+        return cls(session_relevance=session_relevance, error=error, **kwargs)
 
     def replace(self, **changes: Any) -> SessionRelevanceResult:
         return dataclasses.replace(self, **changes)
@@ -193,7 +195,7 @@ class SessionRelevanceResult:
 
     def to_dict(self, *, include_raw: bool = False) -> dict[str, Any]:
         data: dict[str, Any] = {
-            "relevance": self.relevance,
+            "session_relevance": self.session_relevance,
             "ok": self.ok,
             "answers": [_jsonable(a) for a in self.answers],
             "answer_strings": list(self.answer_strings),

@@ -13,8 +13,8 @@ import pytest
 
 from bigfix_remote_session_relevance.client import AsyncSessionRelevanceClient
 from bigfix_remote_session_relevance.config import Config, ConnectionConfig, load_config
-from bigfix_remote_session_relevance.deployment import DEPLOYMENT_ID_RELEVANCE
-from bigfix_remote_session_relevance.exceptions import ConfigError, RelevanceError
+from bigfix_remote_session_relevance.deployment import DEPLOYMENT_ID_SESSION_RELEVANCE
+from bigfix_remote_session_relevance.exceptions import ConfigError, SessionRelevanceEvaluationError
 
 D1 = "1" * 64
 D2 = "2" * 64
@@ -126,7 +126,7 @@ async def test_no_failover_on_relevance_error() -> None:
     async with _client(conns, router) as client:
         (result,) = await client.evaluate("foo")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert router.calls == ["a-ex"]
 
 
@@ -139,12 +139,12 @@ async def test_no_failover_on_pin_mismatch(monkeypatch: pytest.MonkeyPatch) -> N
 
     original = base.Backend._run_with_trust
 
-    async def fake(self: Any, relevance: str, op: Any) -> SessionRelevanceResult:
+    async def fake(self: Any, session_relevance: str, op: Any) -> SessionRelevanceResult:
         if self.connection == "a-ex":
             return SessionRelevanceResult.failure(
-                relevance, ResultError(kind="tls", code="pin_mismatch", message="changed")
+                session_relevance, ResultError(kind="tls", code="pin_mismatch", message="changed")
             )
-        return await original(self, relevance, op)
+        return await original(self, session_relevance, op)
 
     monkeypatch.setattr(base.Backend, "_run_with_trust", fake)
     async with _client(conns, router) as client:
@@ -310,7 +310,7 @@ async def test_raise_errors() -> None:
     conns = [_conn("a", "rest", D1)]
     router = Router({"a": [httpx.Response(200, json={"result": [], "error": "bad"})]})
     async with _client(conns, router, raise_errors=True) as client:
-        with pytest.raises(RelevanceError):
+        with pytest.raises(SessionRelevanceEvaluationError):
             await client.evaluate("q")
 
 
@@ -319,7 +319,7 @@ async def test_evaluate_many() -> None:
     router = Router({"a": lambda req: _ok(len(req.content))})
     async with _client(conns, router) as client:
         batches = await client.evaluate_many(["1", "22"])
-    assert [b[0].relevance for b in batches] == ["1", "22"]
+    assert [b[0].session_relevance for b in batches] == ["1", "22"]
 
 
 # -- deployment discovery -------------------------------------------------------
@@ -376,7 +376,7 @@ async def test_discovery_groups_and_writes_back(tmp_path: Path) -> None:
 
     def wr_route(request: httpx.Request) -> httpx.Response:
         wr_calls.append(request.content.decode())
-        if DEPLOYMENT_ID_RELEVANCE in request.content.decode():
+        if DEPLOYMENT_ID_SESSION_RELEVANCE in request.content.decode():
             return _wr_hash(D1)
         raise AssertionError("same deployment as root: must not be queried")
 
@@ -412,7 +412,7 @@ async def test_discovery_can_be_disabled() -> None:
     async with _client(conns, router, discover=False) as client:
         results = await client.evaluate("1")
     assert len(results) == 2
-    assert all("sha256" not in json.dumps(r.relevance) for r in results)
+    assert all("sha256" not in json.dumps(r.session_relevance) for r in results)
 
 
 # -- explorer extras --------------------------------------------------------------
@@ -496,7 +496,7 @@ async def test_evaluate_stream_stops_remaining_work_when_abandoned() -> None:
 
 
 def _is_discovery(request: httpx.Request) -> bool:
-    return DEPLOYMENT_ID_RELEVANCE in unquote_plus(request.content.decode())
+    return DEPLOYMENT_ID_SESSION_RELEVANCE in unquote_plus(request.content.decode())
 
 
 async def test_known_deployments_stream_before_discovery_finishes() -> None:
@@ -573,6 +573,6 @@ async def test_evaluate_stream_raise_errors_raises_at_the_failure() -> None:
     error = httpx.Response(200, json={"result": [], "error": "bad"})
     router = Router({"d1": [error]})
     async with _client(conns, router, raise_errors=True) as client:
-        with pytest.raises(RelevanceError):
+        with pytest.raises(SessionRelevanceEvaluationError):
             async for _ in client.evaluate_stream("q"):
                 pass  # pragma: no cover

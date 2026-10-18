@@ -25,7 +25,7 @@ _KEYS_RE = re.compile(r"^[\sA-Za-z0-9_{}]+$")
 class ExplorerExtras(Protocol):
     async def evaluate_explorer(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
@@ -37,10 +37,10 @@ def supports_explorer_extras(backend: object) -> bool:
 
 
 def explorer_body(
-    relevance: str, keys: str | None, filters: Mapping[str, str] | None
+    session_relevance: str, keys: str | None, filters: Mapping[str, str] | None
 ) -> dict[str, Any]:
     """Validate the extras and build the JSON body. Bad input is a caller bug."""
-    body: dict[str, Any] = {"relevance": relevance}
+    body: dict[str, Any] = {"relevance": session_relevance}
     if keys is not None:
         if not _KEYS_RE.match(keys) or keys.count("{") != keys.count("}"):
             raise ValueError(f"invalid Explorer keys {keys!r}")
@@ -52,6 +52,6 @@ def explorer_body(
                     f"unknown Explorer filter {name!r}; expected one of {sorted(FILTER_TYPES)}"
                 )
             if not isinstance(condition, str):
-                raise TypeError(f"Explorer filter {name!r} must be a relevance string")
+                raise TypeError(f"Explorer filter {name!r} must be a session relevance string")
         body["filters"] = dict(filters)
     return body

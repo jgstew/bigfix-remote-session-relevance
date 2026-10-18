@@ -46,11 +46,15 @@ Pre-commit runs on commit; keep it green rather than skipping hooks.
   (e.g. `AuthenticationHeader` vs the real `AuthenticateHeader`). When a server
   behaves unexpectedly, capture it (`scripts/capture_fixtures.py`), add it under
   `tests/fixtures/<backend>/captured/`, and write the test against it.
-- **Plain relevance is identical across backends.**
+- **Plain session relevance is identical across backends.**
   `tests/unit/test_backend_contract.py` and `test_captured_fixtures.py`
   enforce it. Backend-specific capabilities are added only through
   separate, opt-in APIs, like `ExplorerExtras`. Never change what plain
   `evaluate()` sends or returns for one backend only.
+- **Say session relevance, never bare `relevance`.** Fields, parameters,
+  `to_dict()` keys and error kinds are `session_relevance`; client relevance
+  is a different dialect (bigfix-remote-client-relevance). Only wire bodies
+  keep the server's `relevance` key.
 - **The result payload is a public contract.** A new `SessionRelevanceResult`
   or `ResultError` field also needs `to_dict()`, DESIGN.md, and
   `test_result_has_every_designed_field` updated.

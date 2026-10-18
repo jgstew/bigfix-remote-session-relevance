@@ -136,7 +136,7 @@ async def test_json_relevance_error(recording_transport: type) -> None:
     async with _backend(rec) as backend:
         result = await backend.evaluate("foo")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == 'The operator "foo" is not defined.'
     assert result.error.detail == 'Error: The operator "foo" is not defined.'
     assert result.answers == ()
@@ -178,7 +178,7 @@ async def test_xml_relevance_error(recording_transport: type) -> None:
     async with _backend(rec) as backend:
         result = await backend.evaluate("foo")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == 'The operator "foo" is not defined.'
 
 
@@ -230,7 +230,7 @@ async def test_plain_text_error_with_400_is_relevance(recording_transport: type)
     async with _backend(rec) as backend:
         result = await backend.evaluate("foo")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.http_status == 400
 
 
@@ -279,7 +279,7 @@ async def test_genuine_disallowed_character_error_is_kept(recording_transport: t
         result = await backend.evaluate("1.5")
         await backend.evaluate("1")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == "This expression contained a character which is not allowed."
     # Fallback still active afterwards: the last query went straight to the form.
     assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"

@@ -34,35 +34,35 @@ def raw_from_response(response: httpx.Response) -> RawResponse:
     )
 
 
-def parse_relevance_response(
-    relevance: str, response: httpx.Response, backend: str
+def parse_session_relevance_response(
+    session_relevance: str, response: httpx.Response, backend: str
 ) -> SessionRelevanceResult:
     """Parse a REST ``/api/query`` or Explorer ``/api/relevance`` response."""
     raw = raw_from_response(response)
     if response.status_code in (401, 403):
         return SessionRelevanceResult.failure(
-            relevance, error_from_status(response, backend), raw=raw
+            session_relevance, error_from_status(response, backend), raw=raw
         )
     if raw.format == "json":
         try:
             data = json.loads(raw.text)
         except ValueError as exc:
-            return _format_error(relevance, raw, backend, f"invalid JSON: {exc}")
-        return _from_json(relevance, data, response, raw, backend)
+            return _format_error(session_relevance, raw, backend, f"invalid JSON: {exc}")
+        return _from_json(session_relevance, data, response, raw, backend)
     if raw.format == "xml":
-        return parse_besapi_xml(relevance, raw, backend)
-    # Plain text: a relevance error on some versions, otherwise not ours.
+        return parse_besapi_xml(session_relevance, raw, backend)
+    # Plain text: a session relevance error on some versions, otherwise not ours.
     if response.status_code == 400 and raw.text.strip():
-        return _relevance_error(relevance, raw.text, raw, backend, http_status=400)
+        return _session_relevance_error(session_relevance, raw.text, raw, backend, http_status=400)
     if response.status_code >= 400:
         return SessionRelevanceResult.failure(
-            relevance, error_from_status(response, backend), raw=raw
+            session_relevance, error_from_status(response, backend), raw=raw
         )
-    return _format_error(relevance, raw, backend, "expected JSON, got non-JSON response")
+    return _format_error(session_relevance, raw, backend, "expected JSON, got non-JSON response")
 
 
 def _from_json(
-    relevance: str, data: Any, response: httpx.Response, raw: RawResponse, backend: str
+    session_relevance: str, data: Any, response: httpx.Response, raw: RawResponse, backend: str
 ) -> SessionRelevanceResult:
     # The REST API reports relevance errors as {"result": [], "error": "..."}
     # with HTTP 200, so the error must be checked before the result.
@@ -77,13 +77,15 @@ def _from_json(
         )
     ):
         status = response.status_code if response.status_code != 200 else None
-        return _relevance_error(relevance, message, raw, backend, http_status=status)
+        return _session_relevance_error(
+            session_relevance, message, raw, backend, http_status=status
+        )
     if isinstance(data, dict) and "result" in data:
         values = data["result"]
         if not isinstance(values, list):
             values = [values]
         return SessionRelevanceResult.from_values(
-            relevance,
+            session_relevance,
             values,
             type=data.get("type"),
             plural=data.get("plural") if isinstance(data.get("plural"), bool) else None,
@@ -92,9 +94,9 @@ def _from_json(
         )
     if response.status_code >= 400:
         return SessionRelevanceResult.failure(
-            relevance, error_from_status(response, backend), raw=raw
+            session_relevance, error_from_status(response, backend), raw=raw
         )
-    return _format_error(relevance, raw, backend, "JSON response has no result")
+    return _format_error(session_relevance, raw, backend, "JSON response has no result")
 
 
 def _json_error_text(data: Any) -> str | None:
@@ -110,20 +112,22 @@ def _json_error_text(data: Any) -> str | None:
     return None
 
 
-def parse_besapi_xml(relevance: str, raw: RawResponse, backend: str) -> SessionRelevanceResult:
+def parse_besapi_xml(
+    session_relevance: str, raw: RawResponse, backend: str
+) -> SessionRelevanceResult:
     """Parse ``<BESAPI><Query>…`` as in bigfix-relevance-debugger's besapi.py."""
     try:
         root = SafeET.fromstring(raw.text)
     except (ParseError, DefusedXmlException) as exc:
-        return _format_error(relevance, raw, backend, f"invalid XML: {exc}")
+        return _format_error(session_relevance, raw, backend, f"invalid XML: {exc}")
     if _local(root.tag) != "BESAPI":
-        return _format_error(relevance, raw, backend, f"unexpected XML root <{root.tag}>")
+        return _format_error(session_relevance, raw, backend, f"unexpected XML root <{root.tag}>")
     query = _child(root, "Query")
     if query is None:
-        return _format_error(relevance, raw, backend, "BESAPI response has no <Query>")
+        return _format_error(session_relevance, raw, backend, "BESAPI response has no <Query>")
     error = _child(query, "Error")
     if error is not None:
-        return _relevance_error(relevance, error.text or "", raw, backend)
+        return _session_relevance_error(session_relevance, error.text or "", raw, backend)
 
     result_el = _child(query, "Result")
     values: list[Any] = []
@@ -136,7 +140,7 @@ def parse_besapi_xml(relevance: str, raw: RawResponse, backend: str) -> SessionR
     evaluation = _child(query, "Evaluation")
     plurality = _child_text(evaluation, "Plurality")
     return SessionRelevanceResult.from_values(
-        relevance,
+        session_relevance,
         values,
         type=types[0] if types else None,
         plural={"Plural": True, "Singular": False}.get(plurality or ""),
@@ -173,13 +177,17 @@ def _float_or_none(value: Any) -> float | None:
     return None
 
 
-def _relevance_error(
-    relevance: str, text: str, raw: RawResponse, backend: str, http_status: int | None = None
+def _session_relevance_error(
+    session_relevance: str,
+    text: str,
+    raw: RawResponse,
+    backend: str,
+    http_status: int | None = None,
 ) -> SessionRelevanceResult:
     return SessionRelevanceResult.failure(
-        relevance,
+        session_relevance,
         ResultError(
-            kind="relevance",
+            kind="session_relevance",
             backend=backend,
             http_status=http_status,
             message=normalize_relevance_error(text),
@@ -190,10 +198,10 @@ def _relevance_error(
 
 
 def _format_error(
-    relevance: str, raw: RawResponse, backend: str, message: str
+    session_relevance: str, raw: RawResponse, backend: str, message: str
 ) -> SessionRelevanceResult:
     return SessionRelevanceResult.failure(
-        relevance,
+        session_relevance,
         ResultError(
             kind="response_format",
             backend=backend,

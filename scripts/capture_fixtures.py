@@ -61,8 +61,8 @@ _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")
 async def capture(conn: ConnectionConfig, trust: TrustStore) -> dict[str, SessionRelevanceResult]:
     results: dict[str, SessionRelevanceResult] = {}
     async with backend_from_config(conn, trust=trust) as backend:
-        for key, relevance in QUERIES.items():
-            results[key] = await backend.evaluate(relevance)
+        for key, session_relevance in QUERIES.items():
+            results[key] = await backend.evaluate(session_relevance)
     if conn.backend in ("rest", "explorer", "webreports") and conn.auth == "basic":
         # A fresh backend, so no session cookie or token from above is reused.
         wrong = dataclasses.replace(conn, password="definitely-wrong", password_env=None)  # noqa: S106

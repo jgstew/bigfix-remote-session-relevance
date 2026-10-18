@@ -18,7 +18,7 @@ import pytest
 from bigfix_remote_session_relevance import AsyncSessionRelevanceClient, KnownCerts, TrustStore
 from bigfix_remote_session_relevance.config import load_config
 from bigfix_remote_session_relevance.deployment import (
-    DEPLOYMENT_ID_RELEVANCE,
+    DEPLOYMENT_ID_SESSION_RELEVANCE,
     GATHER_URL_RELEVANCE,
 )
 
@@ -55,12 +55,12 @@ def _params(backend: str) -> list[Any]:
 
 
 @pytest.mark.parametrize(
-    ("backend", "relevance", "answers", "type_", "plural"),
+    ("backend", "session_relevance", "answers", "type_", "plural"),
     _params("rest") + _params("webreports") + _params("explorer") + _params("saas"),
 )
 async def test_live_normalized_results(
     backend: str,
-    relevance: str,
+    session_relevance: str,
     answers: tuple[Any, ...],
     type_: str | None,
     plural: bool | None,
@@ -68,7 +68,7 @@ async def test_live_normalized_results(
     tmp_path: Path,
 ) -> None:
     async with await _client(backend, live_config_path, tmp_path) as client:
-        for result in await client.evaluate(relevance):
+        for result in await client.evaluate(session_relevance):
             assert result.ok, result.error
             assert (result.answers, result.type, result.plural) == (answers, type_, plural)
 
@@ -84,7 +84,7 @@ async def test_live_relevance_error(backend: str, live_config_path: Path, tmp_pa
     async with await _client(backend, live_config_path, tmp_path) as client:
         for result in await client.evaluate("foo bar baz"):
             assert result.error is not None
-            assert result.error.kind == "relevance"
+            assert result.error.kind == "session_relevance"
             assert result.error.message == 'The operator "foo bar baz" is not defined.'
 
 
@@ -99,7 +99,7 @@ async def test_live_deployment_id_matches_local_hash(
     backend: str, live_config_path: Path, tmp_path: Path
 ) -> None:
     async with await _client(backend, live_config_path, tmp_path) as client:
-        hashed = await client.evaluate(DEPLOYMENT_ID_RELEVANCE)
+        hashed = await client.evaluate(DEPLOYMENT_ID_SESSION_RELEVANCE)
         urls = await client.evaluate(GATHER_URL_RELEVANCE)
     for h, u in zip(hashed, urls, strict=True):
         assert h.ok and u.ok, (h.error, u.error)

@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from ..result import ResultError, SessionRelevanceResult
-from ._parsing import parse_relevance_response
+from ._parsing import parse_session_relevance_response
 from .base import Backend
 from .explorer_extras import explorer_body
 
@@ -16,25 +16,29 @@ from .explorer_extras import explorer_body
 class ExplorerBackend(Backend):
     name = "explorer"
 
-    async def _evaluate(self, client: httpx.AsyncClient, relevance: str) -> SessionRelevanceResult:
-        return await self._post(client, relevance, {"relevance": relevance})
+    async def _evaluate(
+        self, client: httpx.AsyncClient, session_relevance: str
+    ) -> SessionRelevanceResult:
+        return await self._post(client, session_relevance, {"relevance": session_relevance})
 
     async def evaluate_explorer(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
     ) -> SessionRelevanceResult:
         """Evaluate with Explorer ``keys``/``filters`` (additive; see explorer_extras)."""
-        body = explorer_body(relevance, keys, filters)
-        return await self._run(relevance, lambda client: self._post(client, relevance, body))
+        body = explorer_body(session_relevance, keys, filters)
+        return await self._run(
+            session_relevance, lambda client: self._post(client, session_relevance, body)
+        )
 
     async def _post(
-        self, client: httpx.AsyncClient, relevance: str, body: dict[str, Any]
+        self, client: httpx.AsyncClient, session_relevance: str, body: dict[str, Any]
     ) -> SessionRelevanceResult:
         response = await client.post("/api/relevance", json=body)
-        result = parse_relevance_response(relevance, response, self.name)
+        result = parse_session_relevance_response(session_relevance, response, self.name)
         return await self._explain_unavailable(client, result, response)
 
     async def _explain_unavailable(

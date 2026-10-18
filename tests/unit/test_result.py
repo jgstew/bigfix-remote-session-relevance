@@ -16,7 +16,7 @@ from bigfix_remote_session_relevance.result import (
 # The designed public field set. Adding a field is an additive contract change:
 # update this list, to_dict's key order, and DESIGN.md together.
 DESIGNED_FIELDS = [
-    "relevance",
+    "session_relevance",
     "answers",
     "answer_strings",
     "type",
@@ -32,7 +32,7 @@ DESIGNED_FIELDS = [
 ]
 
 DESIGNED_DICT_KEYS = [
-    "relevance",
+    "session_relevance",
     "ok",
     "answers",
     "answer_strings",
@@ -51,6 +51,20 @@ DESIGNED_DICT_KEYS = [
 
 def test_result_has_every_designed_field() -> None:
     assert [f.name for f in dataclasses.fields(SessionRelevanceResult)] == DESIGNED_FIELDS
+
+
+def test_session_relevance_is_named_explicitly() -> None:
+    # Session and client relevance are different dialects; the public API
+    # never says bare "relevance" (0.5.0 renamed it without an alias).
+    result = SessionRelevanceResult.from_values(session_relevance="1", values=["1"])
+    assert result.session_relevance == "1"
+    assert not hasattr(result, "relevance")
+    with pytest.raises(TypeError):
+        SessionRelevanceResult(relevance="1")  # type: ignore[call-arg]
+    assert exceptions.EXCEPTION_FOR_KIND["session_relevance"] is (
+        exceptions.SessionRelevanceEvaluationError
+    )
+    assert not hasattr(exceptions, "RelevanceError")
 
 
 def test_from_values_coerces_by_type_and_builds_strings() -> None:
@@ -76,7 +90,7 @@ def test_from_values_without_type_keeps_strings() -> None:
 
 
 def test_failure_has_no_answers() -> None:
-    err = ResultError(kind="relevance", message='The operator "foo" is not defined.')
+    err = ResultError(kind="session_relevance", message='The operator "foo" is not defined.')
     result = SessionRelevanceResult.failure("foo", err, backend="rest")
     assert not result.ok
     assert result.answers == ()
@@ -92,7 +106,7 @@ def test_result_error_rejects_unknown_kind() -> None:
 
 def test_error_kinds_are_the_designed_set() -> None:
     assert ERROR_KINDS == (
-        "relevance",
+        "session_relevance",
         "authentication",
         "connection",
         "timeout",

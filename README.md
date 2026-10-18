@@ -108,7 +108,7 @@ it actually collapses something.
 | Exit code | Meaning |
 |---|---|
 | 0 | every queried deployment answered |
-| 1 | a relevance error |
+| 1 | a session relevance error |
 | 2 | nothing reachable, or credentials rejected everywhere |
 | 3 | partial: some deployments failed |
 | 64 | usage or configuration error |
@@ -142,6 +142,18 @@ async with AsyncSessionRelevanceClient() as client:  # default config
 `SessionRelevanceClient` has the same methods, synchronously, and works even
 inside a running event loop. Single backends (`RestBackend`,
 `ExplorerBackend`, `WebReportsBackend`) can be used directly too.
+
+The query is always named `session_relevance` (never a bare `relevance`, which
+could mean client relevance): `result.session_relevance`, the `to_dict()` /
+`--json` key, the error kind, and the `session_relevance=` /
+`session_relevances=` parameters.
+
+> **Upgrading from 0.4 or earlier:** 0.5.0 renamed, with no alias,
+> `result.relevance` → `result.session_relevance` (and the `--json` key),
+> the `relevance=` / `relevances=` parameters → `session_relevance=` /
+> `session_relevances=`, error kind `"relevance"` → `"session_relevance"`, and
+> `RelevanceError` → `SessionRelevanceEvaluationError`. Helpers follow suit
+> (`encode_session_relevance`, `parse_session_relevance_response`, …).
 
 ## Development
 

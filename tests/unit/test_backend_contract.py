@@ -109,7 +109,7 @@ def _normalized(result: Any) -> tuple[Any, ...]:
         result.plural,
         result.count,
         err.kind if err else None,
-        err.message if err and err.kind in ("relevance", "authentication") else None,
+        err.message if err and err.kind in ("session_relevance", "authentication") else None,
     )
 
 

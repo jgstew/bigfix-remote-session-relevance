@@ -50,42 +50,42 @@ class SessionRelevanceClient:
             raise RuntimeError("SessionRelevanceClient is closed")
         return self._portal.call(functools.partial(func, *args, **kwargs))
 
-    def evaluate(self, relevance: str) -> SessionRelevanceResults:
-        result: SessionRelevanceResults = self._call(self._client.evaluate, relevance)
+    def evaluate(self, session_relevance: str) -> SessionRelevanceResults:
+        result: SessionRelevanceResults = self._call(self._client.evaluate, session_relevance)
         return result
 
-    def evaluate_stream(self, relevance: str) -> Iterator[SessionRelevanceResult]:
+    def evaluate_stream(self, session_relevance: str) -> Iterator[SessionRelevanceResult]:
         """`evaluate`, yielding each result as it lands (completion order)."""
-        return self._iterate(self._client.evaluate_stream, relevance)
+        return self._iterate(self._client.evaluate_stream, session_relevance)
 
-    def evaluate_many(self, relevances: Iterable[str]) -> list[SessionRelevanceResults]:
+    def evaluate_many(self, session_relevances: Iterable[str]) -> list[SessionRelevanceResults]:
         result: list[SessionRelevanceResults] = self._call(
-            self._client.evaluate_many, list(relevances)
+            self._client.evaluate_many, list(session_relevances)
         )
         return result
 
     def evaluate_explorer(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
     ) -> SessionRelevanceResults:
         result: SessionRelevanceResults = self._call(
-            self._client.evaluate_explorer, relevance, keys=keys, filters=filters
+            self._client.evaluate_explorer, session_relevance, keys=keys, filters=filters
         )
         return result
 
     def evaluate_explorer_stream(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
     ) -> Iterator[SessionRelevanceResult]:
-        explorer_body(relevance, keys, filters)  # invalid input raises here, not mid-stream
+        explorer_body(session_relevance, keys, filters)  # invalid input raises here, not mid-stream
         return self._iterate(
-            self._client.evaluate_explorer_stream, relevance, keys=keys, filters=filters
+            self._client.evaluate_explorer_stream, session_relevance, keys=keys, filters=filters
         )
 
     def result_count(self) -> int | None:
@@ -160,15 +160,15 @@ async def _make_client(*args: Any, **kwargs: Any) -> AsyncSessionRelevanceClient
     return AsyncSessionRelevanceClient(*args, **kwargs)
 
 
-def evaluate_session_relevance(relevance: str, **kwargs: Any) -> SessionRelevanceResults:
+def evaluate_session_relevance(session_relevance: str, **kwargs: Any) -> SessionRelevanceResults:
     """One-shot sync query across the configured connections (default config)."""
     with SessionRelevanceClient(**kwargs) as client:
-        return client.evaluate(relevance)
+        return client.evaluate(session_relevance)
 
 
 async def async_evaluate_session_relevance(
-    relevance: str, **kwargs: Any
+    session_relevance: str, **kwargs: Any
 ) -> SessionRelevanceResults:
     """One-shot async query across the configured connections (default config)."""
     async with AsyncSessionRelevanceClient(**kwargs) as client:
-        return await client.evaluate(relevance)
+        return await client.evaluate(session_relevance)

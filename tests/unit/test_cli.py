@@ -163,7 +163,7 @@ def test_stdin_relevance(
         ["--json", "--backend", "rest", "-"],
         {"dev-root": httpx.Response(200, json={"result": [], "plural": True, "type": "string"})},
     )
-    assert json.loads(capsys.readouterr().out)[0]["relevance"] == "names of bes sites"
+    assert json.loads(capsys.readouterr().out)[0]["session_relevance"] == "names of bes sites"
 
 
 def test_missing_relevance_is_usage_error(

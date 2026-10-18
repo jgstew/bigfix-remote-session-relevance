@@ -28,7 +28,11 @@ from .backends.base import Backend, TrustPolicy
 from .backends.registry import BACKEND_CLASSES
 from .backends.saas import SaasBackend
 from .config import ConnectionConfig, load_config, save_connection
-from .deployment import DEPLOYMENT_ID_RELEVANCE, deployment_id_from_hashes, discover_deployment_id
+from .deployment import (
+    DEPLOYMENT_ID_SESSION_RELEVANCE,
+    deployment_id_from_hashes,
+    discover_deployment_id,
+)
 from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
 from .server_address import normalize_server, saas_api_address
@@ -146,12 +150,12 @@ async def probe_saas(
 
 
 async def _probe_one(backend: Backend, server: str) -> ProbeResult:
-    result = await backend.evaluate(DEPLOYMENT_ID_RELEVANCE)
+    result = await backend.evaluate(DEPLOYMENT_ID_SESSION_RELEVANCE)
     if result.ok:
         found = deployment_id_from_hashes(str(a) for a in result.answers)
         return ProbeResult(backend.name, server, "ok", found, "")
     error = result.error
-    if error is None or error.kind == "relevance":
+    if error is None or error.kind == "session_relevance":
         found = await discover_deployment_id(backend)
         return ProbeResult(backend.name, server, "ok", found, "")
     status = {

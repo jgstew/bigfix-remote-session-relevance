@@ -330,13 +330,15 @@ class Backend(ABC):
 
     # -- public API -----------------------------------------------------------------
 
-    async def evaluate(self, relevance: str) -> SessionRelevanceResult:
+    async def evaluate(self, session_relevance: str) -> SessionRelevanceResult:
         """Evaluate plain session relevance. Never raises for per-query failures."""
-        return await self._run(relevance, lambda client: self._evaluate(client, relevance))
+        return await self._run(
+            session_relevance, lambda client: self._evaluate(client, session_relevance)
+        )
 
     @abstractmethod
     async def _evaluate(
-        self, client: httpx.AsyncClient, relevance: str
+        self, client: httpx.AsyncClient, session_relevance: str
     ) -> SessionRelevanceResult: ...
 
     async def resolve_credentials(self) -> ResultError | None:
@@ -446,9 +448,9 @@ class Backend(ABC):
             )
         return self._client
 
-    async def _run(self, relevance: str, operation: Operation) -> SessionRelevanceResult:
+    async def _run(self, session_relevance: str, operation: Operation) -> SessionRelevanceResult:
         start = time.perf_counter()
-        result = await self._run_with_trust(relevance, operation)
+        result = await self._run_with_trust(session_relevance, operation)
         return result.replace(
             connection=self.connection,
             deployment_id=self.deployment_id,
@@ -457,16 +459,18 @@ class Backend(ABC):
             elapsed_ms=round((time.perf_counter() - start) * 1000, 3),
         )
 
-    async def _run_with_trust(self, relevance: str, operation: Operation) -> SessionRelevanceResult:
+    async def _run_with_trust(
+        self, session_relevance: str, operation: Operation
+    ) -> SessionRelevanceResult:
         problem = await self.resolve_credentials() or self._auth_problem()
         if problem is not None:
-            return SessionRelevanceResult.failure(relevance, problem)
+            return SessionRelevanceResult.failure(session_relevance, problem)
         for attempt in range(2):
             try:
                 client = self._get_client()
             except _ClientCertError as exc:
                 return SessionRelevanceResult.failure(
-                    relevance,
+                    session_relevance,
                     ResultError(
                         kind="tls",
                         code="client_cert",
@@ -492,7 +496,7 @@ class Backend(ABC):
                             error = dataclasses.replace(
                                 error, message=f"{error.message}: {err.message}"
                             )
-                        return SessionRelevanceResult.failure(relevance, error)
+                        return SessionRelevanceResult.failure(session_relevance, error)
                     if attempt == 0 and await self.trust.on_untrusted(self.address):
                         await self.aclose()
                         continue
@@ -506,7 +510,7 @@ class Backend(ABC):
                         ),
                         detail=err.message,
                     )
-                return SessionRelevanceResult.failure(relevance, err)
+                return SessionRelevanceResult.failure(session_relevance, err)
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _response_problem(self, response: httpx.Response) -> ResultError | None:

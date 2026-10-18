@@ -76,19 +76,21 @@ class WebReportsBackend(Backend):
     def _request_headers(self) -> dict[str, str]:
         return {}
 
-    async def _evaluate(self, client: httpx.AsyncClient, relevance: str) -> SessionRelevanceResult:
+    async def _evaluate(
+        self, client: httpx.AsyncClient, session_relevance: str
+    ) -> SessionRelevanceResult:
         if self._soap_method == "plain":
-            return await self._plain(client, relevance)
+            return await self._plain(client, session_relevance)
         relogged = False
         while True:
             used_token = self._session_token is not None
             response = await client.post(
                 SOAP_PATH,
-                content=self._structured_envelope(relevance),
+                content=self._structured_envelope(session_relevance),
                 headers={"Content-Type": "text/xml; charset=utf-8"},
             )
             try:
-                return self._parse_structured(relevance, response)
+                return self._parse_structured(session_relevance, response)
             except _Fault as fault:
                 if self._soap_method == "auto" and _UNSUPPORTED_RE.search(fault.text):
                     log.info(
@@ -96,29 +98,31 @@ class WebReportsBackend(Backend):
                         self.connection or self.name,
                     )
                     self._soap_method = "plain"
-                    return await self._plain(client, relevance)
+                    return await self._plain(client, session_relevance)
                 # Structured relevance errors arrive as <error>, not as a Fault,
                 # so a Fault on the token path is about the token: log in again.
                 if used_token and not relogged:
                     self._session_token = None
                     relogged = True
                     continue
-                return self._fault_result(relevance, fault)
+                return self._fault_result(session_relevance, fault)
 
-    async def _plain(self, client: httpx.AsyncClient, relevance: str) -> SessionRelevanceResult:
+    async def _plain(
+        self, client: httpx.AsyncClient, session_relevance: str
+    ) -> SessionRelevanceResult:
         response = await client.post(
             SOAP_PATH,
-            content=self._plain_envelope(relevance),
+            content=self._plain_envelope(session_relevance),
             headers={"Content-Type": "text/xml; charset=utf-8"},
         )
         try:
-            return self._parse_plain(relevance, response)
+            return self._parse_plain(session_relevance, response)
         except _Fault as fault:
-            return self._fault_result(relevance, fault)
+            return self._fault_result(session_relevance, fault)
 
     # -- envelopes ------------------------------------------------------------------
 
-    def _structured_envelope(self, relevance: str) -> str:
+    def _structured_envelope(self, session_relevance: str) -> str:
         user = escape(self.username or "")
         if self._session_token is not None:
             # The WSDL's type name. developer.bigfix.com documents
@@ -135,14 +139,14 @@ class WebReportsBackend(Backend):
         )
         body = (
             f'<GetStructuredRelevanceResult xmlns="{BF_NS}">'
-            f"<relevanceExpr>{escape(relevance)}</relevanceExpr></GetStructuredRelevanceResult>"
+            f"<relevanceExpr>{escape(session_relevance)}</relevanceExpr></GetStructuredRelevanceResult>"
         )
         return _envelope(header, body)
 
-    def _plain_envelope(self, relevance: str) -> str:
+    def _plain_envelope(self, session_relevance: str) -> str:
         body = (
             f'<GetRelevanceResult xmlns="{BF_NS}">'
-            f"<relevanceExpr>{escape(relevance)}</relevanceExpr>"
+            f"<relevanceExpr>{escape(session_relevance)}</relevanceExpr>"
             f"<username>{escape(self.username or '')}</username>"
             f"<password>{escape(self._password or '')}</password></GetRelevanceResult>"
         )
@@ -151,22 +155,22 @@ class WebReportsBackend(Backend):
     # -- parsing ----------------------------------------------------------------------
 
     def _parse_envelope(
-        self, relevance: str, response: httpx.Response
+        self, session_relevance: str, response: httpx.Response
     ) -> tuple[Element | SessionRelevanceResult, RawResponse]:
         raw = raw_from_response(response)
         if raw.format != "xml":
             if response.status_code >= 400:
                 return SessionRelevanceResult.failure(
-                    relevance, error_from_status(response, self.name), raw=raw
+                    session_relevance, error_from_status(response, self.name), raw=raw
                 ), raw
-            return self._format_error(relevance, raw, "expected a SOAP XML response"), raw
+            return self._format_error(session_relevance, raw, "expected a SOAP XML response"), raw
         try:
             root = SafeET.fromstring(raw.text)
         except (ParseError, DefusedXmlException) as exc:
-            return self._format_error(relevance, raw, f"invalid XML: {exc}"), raw
+            return self._format_error(session_relevance, raw, f"invalid XML: {exc}"), raw
         body = _find(root, "Body")
         if body is None:
-            return self._format_error(relevance, raw, "no SOAP Body"), raw
+            return self._format_error(session_relevance, raw, "no SOAP Body"), raw
         fault = _find(body, "Fault")
         if fault is not None:
             text = _find_text(fault, "faultstring") or _find_text(fault, "Text") or ""
@@ -176,16 +180,18 @@ class WebReportsBackend(Backend):
             self._session_token = token
         return body, raw
 
-    def _parse_structured(self, relevance: str, response: httpx.Response) -> SessionRelevanceResult:
-        body, raw = self._parse_envelope(relevance, response)
+    def _parse_structured(
+        self, session_relevance: str, response: httpx.Response
+    ) -> SessionRelevanceResult:
+        body, raw = self._parse_envelope(session_relevance, response)
         if isinstance(body, SessionRelevanceResult):
             return body
         node = _find(body, "StructuredRelevanceResult")
         if node is None:
-            return self._format_error(relevance, raw, "no StructuredRelevanceResult")
+            return self._format_error(session_relevance, raw, "no StructuredRelevanceResult")
         error_text = _find_text(node, "error")
         if error_text:
-            return self._relevance_error(relevance, error_text, raw)
+            return self._session_relevance_error(session_relevance, error_text, raw)
         results = _child(node, "results")
         elements = list(results) if results is not None else []
         values = [_render(el) for el in elements]
@@ -194,7 +200,7 @@ class WebReportsBackend(Backend):
             type_text = _ELEMENT_TYPES.get(_local(elements[0].tag).lower())
         plural_text = (_child_text(node, "plural") or "").strip().lower()
         return SessionRelevanceResult.from_values(
-            relevance,
+            session_relevance,
             values,
             type=type_text or None,
             plural={"true": True, "false": False}.get(plural_text),
@@ -202,24 +208,26 @@ class WebReportsBackend(Backend):
             raw=raw,
         )
 
-    def _parse_plain(self, relevance: str, response: httpx.Response) -> SessionRelevanceResult:
-        body, raw = self._parse_envelope(relevance, response)
+    def _parse_plain(
+        self, session_relevance: str, response: httpx.Response
+    ) -> SessionRelevanceResult:
+        body, raw = self._parse_envelope(session_relevance, response)
         if isinstance(body, SessionRelevanceResult):
             return body
         node = _find(body, "GetRelevanceResultResponse")
         if node is None:
-            return self._format_error(relevance, raw, "no GetRelevanceResultResponse")
+            return self._format_error(session_relevance, raw, "no GetRelevanceResultResponse")
         values = [child.text or "" for child in node if _local(child.tag) == "a"]
         # Documented rule: one <a> is a singular result; zero or several is plural.
         return SessionRelevanceResult.from_values(
-            relevance, values, type=None, plural=len(values) != 1, raw=raw
+            session_relevance, values, type=None, plural=len(values) != 1, raw=raw
         )
 
-    def _fault_result(self, relevance: str, fault: _Fault) -> SessionRelevanceResult:
+    def _fault_result(self, session_relevance: str, fault: _Fault) -> SessionRelevanceResult:
         if _AUTH_RE.search(fault.text):
             self._session_token = None
             return SessionRelevanceResult.failure(
-                relevance,
+                session_relevance,
                 ResultError(
                     kind="authentication",
                     backend=self.name,
@@ -229,15 +237,15 @@ class WebReportsBackend(Backend):
                 ),
                 raw=fault.raw,
             )
-        return self._relevance_error(relevance, fault.text, fault.raw)
+        return self._session_relevance_error(session_relevance, fault.text, fault.raw)
 
-    def _relevance_error(
-        self, relevance: str, text: str, raw: RawResponse
+    def _session_relevance_error(
+        self, session_relevance: str, text: str, raw: RawResponse
     ) -> SessionRelevanceResult:
         return SessionRelevanceResult.failure(
-            relevance,
+            session_relevance,
             ResultError(
-                kind="relevance",
+                kind="session_relevance",
                 backend=self.name,
                 message=normalize_relevance_error(text),
                 detail=text[:500],
@@ -246,10 +254,10 @@ class WebReportsBackend(Backend):
         )
 
     def _format_error(
-        self, relevance: str, raw: RawResponse, message: str
+        self, session_relevance: str, raw: RawResponse, message: str
     ) -> SessionRelevanceResult:
         return SessionRelevanceResult.failure(
-            relevance,
+            session_relevance,
             ResultError(
                 kind="response_format",
                 backend=self.name,

@@ -47,7 +47,7 @@ import httpx
 
 from ..result import ResultError, SessionRelevanceResult
 from ..server_address import saas_api_address
-from ._parsing import _float_or_none, _format_error, _relevance_error, raw_from_response
+from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
 from .base import Backend, error_from_status
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ __all__ = [
     "SaasBackend",
     "SaasSession",
     "SaasSessionPool",
-    "parse_saas_relevance",
+    "parse_saas_session_relevance",
     "saas_api_address",
 ]
 
@@ -172,19 +172,25 @@ class SaasBackend(Backend):
             )
         return None
 
-    async def _evaluate(self, client: httpx.AsyncClient, relevance: str) -> SessionRelevanceResult:
+    async def _evaluate(
+        self, client: httpx.AsyncClient, session_relevance: str
+    ) -> SessionRelevanceResult:
         problem = await self._ensure_session(client)
         if problem is not None:
-            return SessionRelevanceResult.failure(relevance, problem)
+            return SessionRelevanceResult.failure(session_relevance, problem)
         generation = self._sync_cookies(client)
-        response = await self._post(client, RELEVANCE_PATH, {"query": relevance}, sid=self.sid)
+        response = await self._post(
+            client, RELEVANCE_PATH, {"query": session_relevance}, sid=self.sid
+        )
         if response.status_code == 401:
             problem = await self._renew(client, generation)
             if problem is not None:
-                return SessionRelevanceResult.failure(relevance, problem)
+                return SessionRelevanceResult.failure(session_relevance, problem)
             self._sync_cookies(client)
-            response = await self._post(client, RELEVANCE_PATH, {"query": relevance}, sid=self.sid)
-        return parse_saas_relevance(relevance, response, self.name)
+            response = await self._post(
+                client, RELEVANCE_PATH, {"query": session_relevance}, sid=self.sid
+            )
+        return parse_saas_session_relevance(session_relevance, response, self.name)
 
     # -- session ----------------------------------------------------------------------
 
@@ -319,24 +325,24 @@ def _error_message(response: httpx.Response) -> str | None:
     return None
 
 
-def parse_saas_relevance(
-    relevance: str, response: httpx.Response, backend: str
+def parse_saas_session_relevance(
+    session_relevance: str, response: httpx.Response, backend: str
 ) -> SessionRelevanceResult:
     raw = raw_from_response(response)
     if response.status_code in (401, 403):
         return SessionRelevanceResult.failure(
-            relevance, error_from_status(response, backend), raw=raw
+            session_relevance, error_from_status(response, backend), raw=raw
         )
     if raw.format != "json":
         if response.status_code >= 400:
             return SessionRelevanceResult.failure(
-                relevance, error_from_status(response, backend), raw=raw
+                session_relevance, error_from_status(response, backend), raw=raw
             )
-        return _format_error(relevance, raw, backend, "expected JSON from BigFix SaaS")
+        return _format_error(session_relevance, raw, backend, "expected JSON from BigFix SaaS")
     try:
         body = json.loads(raw.text)
     except ValueError as exc:
-        return _format_error(relevance, raw, backend, f"invalid JSON: {exc}")
+        return _format_error(session_relevance, raw, backend, f"invalid JSON: {exc}")
     data = body.get("data") if isinstance(body, dict) else None
     if response.status_code >= 400:
         error = error_from_status(response, backend)
@@ -350,19 +356,19 @@ def parse_saas_relevance(
                 message=message,
                 detail=error.detail,
             )
-        return SessionRelevanceResult.failure(relevance, error, raw=raw)
+        return SessionRelevanceResult.failure(session_relevance, error, raw=raw)
     if isinstance(data, dict):
         if isinstance(data.get("error"), str):
-            return _relevance_error(relevance, data["error"], raw, backend)
+            return _session_relevance_error(session_relevance, data["error"], raw, backend)
         if "answer" in data:
             values = data["answer"] if isinstance(data["answer"], list) else [data["answer"]]
             plural = data.get("plural")
             return SessionRelevanceResult.from_values(
-                relevance,
+                session_relevance,
                 values,
                 type=data.get("type"),
                 plural=plural if isinstance(plural, bool) else None,
                 evaluation_time_ms=_float_or_none(data.get("evaltime")),
                 raw=raw,
             )
-    return _format_error(relevance, raw, backend, "BigFix SaaS response has no answer")
+    return _format_error(session_relevance, raw, backend, "BigFix SaaS response has no answer")

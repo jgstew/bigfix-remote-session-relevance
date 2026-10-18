@@ -13,7 +13,7 @@ from collections.abc import Iterable
 
 from .backends.base import Backend
 
-DEPLOYMENT_ID_RELEVANCE = "sha256 of gather url of bes license"
+DEPLOYMENT_ID_SESSION_RELEVANCE = "sha256 of gather url of bes license"
 GATHER_URL_RELEVANCE = "gather url of bes license"
 
 
@@ -38,10 +38,10 @@ def group_key(connection: str, deployment_id: str | None) -> str:
 
 async def discover_deployment_id(backend: Backend) -> str | None:
     """Ask a connection for its deployment id; None when it cannot say."""
-    result = await backend.evaluate(DEPLOYMENT_ID_RELEVANCE)
+    result = await backend.evaluate(DEPLOYMENT_ID_SESSION_RELEVANCE)
     if result.ok:
         return deployment_id_from_hashes(str(a) for a in result.answers)
-    if result.error is not None and result.error.kind == "relevance":
+    if result.error is not None and result.error.kind == "session_relevance":
         # Older servers lack `sha256 of <string>`: hash the gather URL here,
         # the same way (UTF-8, lowercase hex), so ids agree across versions.
         fallback = await backend.evaluate(GATHER_URL_RELEVANCE)

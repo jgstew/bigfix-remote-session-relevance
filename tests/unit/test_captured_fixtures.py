@@ -91,7 +91,7 @@ async def test_relevance_errors(
     # empty result must not be mistaken for an empty success.
     result = await _from_source(source, key, recording_transport)
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == ERRORS[key]
     assert result.answers == ()
     assert result.plural is None
@@ -158,7 +158,7 @@ async def test_webreports_plain_method_error(recording_transport: type) -> None:
         "webreports", "error_unknown__plain", recording_transport, soap_method="plain"
     )
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == 'The operator "foo bar baz" is not defined.'
 
 
@@ -298,6 +298,6 @@ async def test_extras_filter_that_is_not_a_set(backend: str, recording_transport
         backend, "filter_bad_type", recording_transport, filters={"computers": "true"}
     )
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.http_status == 400
     assert result.error.message.startswith('Filter "computers":')

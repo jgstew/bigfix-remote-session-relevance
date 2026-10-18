@@ -89,7 +89,7 @@ wheels = [
 
 [[package]]
 name = "bigfix-remote-session-relevance"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },

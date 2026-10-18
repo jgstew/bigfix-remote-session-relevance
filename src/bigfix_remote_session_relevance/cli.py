@@ -1,6 +1,6 @@
-"""``bigfix-remote-session-relevance "relevance"``: query every reachable deployment.
+"""``bigfix-remote-session-relevance "session relevance"``: query every reachable deployment.
 
-Exit codes: 0 all ok, 1 a relevance error, 2 nothing reachable (or auth
+Exit codes: 0 all ok, 1 a session relevance error, 2 nothing reachable (or auth
 failed everywhere), 3 partial (some deployments failed), 64 usage/config.
 """
 
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(REST API, BigFix Explorer, Web Reports)."
         ),
     )
-    p.add_argument("relevance", nargs="?", help='session relevance, or "-" to read stdin')
+    p.add_argument("session_relevance", nargs="?", help='session relevance, or "-" to read stdin')
     p.add_argument("--version", action="version", version=_version())
     p.add_argument(
         "--config",
@@ -179,13 +179,13 @@ def main(
         }
         if args.discover_deployments:
             return _discover(config, client_kwargs)
-        relevance = _read_relevance(args.relevance)
+        session_relevance = _read_session_relevance(args.session_relevance)
         filters = _parse_filters(args.filter)
         explorer = args.keys is not None or filters is not None
         if explorer:
             # Bad input is rejected before any connection, prompt or discovery.
             try:
-                explorer_body(relevance, args.keys, filters)
+                explorer_body(session_relevance, args.keys, filters)
             except (ValueError, TypeError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_USAGE
@@ -193,16 +193,18 @@ def main(
             if args.json:
                 # One JSON document needs every result in; it alone waits.
                 results = (
-                    client.evaluate_explorer(relevance, keys=args.keys, filters=filters)
+                    client.evaluate_explorer(session_relevance, keys=args.keys, filters=filters)
                     if explorer
-                    else client.evaluate(relevance)
+                    else client.evaluate(session_relevance)
                 )
                 print(json.dumps(results.to_dict(include_raw=args.raw), indent=2))
             else:
                 stream = (
-                    client.evaluate_explorer_stream(relevance, keys=args.keys, filters=filters)
+                    client.evaluate_explorer_stream(
+                        session_relevance, keys=args.keys, filters=filters
+                    )
                     if explorer
-                    else client.evaluate_stream(relevance)
+                    else client.evaluate_stream(session_relevance)
                 )
                 count = client.result_count()
                 labelled = None if count is None else count > 1
@@ -272,7 +274,7 @@ def _configure_logging(verbose: int) -> None:
         logging.getLogger(noisy).setLevel(logging.DEBUG if verbose > 2 else logging.WARNING)
 
 
-def _read_relevance(value: str | None) -> str:
+def _read_session_relevance(value: str | None) -> str:
     if value is None:
         raise _UsageError("a session relevance expression is required (or --setup)")
     text = sys.stdin.read() if value == "-" else value

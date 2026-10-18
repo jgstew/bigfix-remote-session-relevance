@@ -193,7 +193,7 @@ async def test_captured_relevance_error(recording_transport: type) -> None:
     async with _backend(rec) as backend:
         result = await backend.evaluate("foo bar baz")
     assert result.error is not None
-    assert result.error.kind == "relevance"
+    assert result.error.kind == "session_relevance"
     assert result.error.message == 'The operator "foo bar baz" is not defined.'
     assert result.answers == ()
     assert result.plural is None

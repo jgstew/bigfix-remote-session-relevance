@@ -4,7 +4,7 @@ Default mode ``per_deployment``: connections are grouped by deployment id
 (see ``deployment.py``), every group runs concurrently, and each group
 returns one result from the first connection that works, tried in
 ``backend_preference`` order. A group fails over on outages and auth
-failures, never on a relevance error (the same query fails everywhere)
+failures, never on a session relevance error (the same query fails everywhere)
 and never around a changed pinned certificate (a security signal).
 
 Mode ``all`` queries every enabled connection and returns each result.
@@ -148,48 +148,52 @@ class AsyncSessionRelevanceClient:
 
     # -- public API -----------------------------------------------------------------
 
-    async def evaluate(self, relevance: str) -> SessionRelevanceResults:
+    async def evaluate(self, session_relevance: str) -> SessionRelevanceResults:
         """Plain session relevance on every deployment (or connection, in ``all`` mode)."""
         return await self._collect(
-            self._stream(relevance, self._plain(relevance), capable=None, streaming=False)
+            self._stream(
+                session_relevance, self._plain(session_relevance), capable=None, streaming=False
+            )
         )
 
-    def evaluate_stream(self, relevance: str) -> AsyncGenerator[SessionRelevanceResult]:
+    def evaluate_stream(self, session_relevance: str) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate`, yielding each result as it lands (completion order).
 
         Abandoning the iteration early (``break``, or ``aclose()``) cancels
         the queries still running. With ``raise_errors`` it raises at the
         first failed result.
         """
-        return self._stream(relevance, self._plain(relevance), capable=None)
+        return self._stream(session_relevance, self._plain(session_relevance), capable=None)
 
-    async def evaluate_many(self, relevances: Iterable[str]) -> list[SessionRelevanceResults]:
-        return list(await asyncio.gather(*(self.evaluate(r) for r in relevances)))
+    async def evaluate_many(
+        self, session_relevances: Iterable[str]
+    ) -> list[SessionRelevanceResults]:
+        return list(await asyncio.gather(*(self.evaluate(r) for r in session_relevances)))
 
     async def evaluate_explorer(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
     ) -> SessionRelevanceResults:
         """Additive Explorer extras, on connections that can reach Explorer only."""
-        call = self._explorer(relevance, keys, filters)
+        call = self._explorer(session_relevance, keys, filters)
         return await self._collect(
-            self._stream(relevance, call, capable=supports_explorer_extras, streaming=False)
+            self._stream(session_relevance, call, capable=supports_explorer_extras, streaming=False)
         )
 
     def evaluate_explorer_stream(
         self,
-        relevance: str,
+        session_relevance: str,
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate_explorer`, yielding each result as it lands. Invalid
         keys or filters raise here, before anything is queried."""
-        call = self._explorer(relevance, keys, filters)
-        return self._stream(relevance, call, capable=supports_explorer_extras)
+        call = self._explorer(session_relevance, keys, filters)
+        return self._stream(session_relevance, call, capable=supports_explorer_extras)
 
     def result_count(self) -> int | None:
         """How many results an evaluation returns: one per deployment, or per
@@ -336,18 +340,18 @@ class AsyncSessionRelevanceClient:
         return list(groups.items())
 
     @staticmethod
-    def _plain(relevance: str) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
-        return lambda backend: backend.evaluate(relevance)
+    def _plain(session_relevance: str) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+        return lambda backend: backend.evaluate(session_relevance)
 
     @staticmethod
     def _explorer(
-        relevance: str, keys: str | None, filters: Mapping[str, str] | None
+        session_relevance: str, keys: str | None, filters: Mapping[str, str] | None
     ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
-        explorer_body(relevance, keys, filters)  # validate once, up front
+        explorer_body(session_relevance, keys, filters)  # validate once, up front
 
         def call(backend: Backend) -> Awaitable[SessionRelevanceResult]:
             return backend.evaluate_explorer(  # type: ignore[attr-defined, no-any-return]
-                relevance, keys=keys, filters=filters
+                session_relevance, keys=keys, filters=filters
             )
 
         return call
@@ -369,7 +373,7 @@ class AsyncSessionRelevanceClient:
 
     async def _stream(
         self,
-        relevance: str,
+        session_relevance: str,
         call: Callable[[Backend], Awaitable[SessionRelevanceResult]],
         *,
         capable: Callable[[Backend], bool] | None,
@@ -395,7 +399,7 @@ class AsyncSessionRelevanceClient:
         def group(
             key: str, members: list[ConnectionConfig], discovery: asyncio.Future[None] | None
         ) -> Awaitable[SessionRelevanceResult]:
-            return self._run_group(key, members, relevance, call, capable, discovery)
+            return self._run_group(key, members, session_relevance, call, capable, discovery)
 
         if self.mode == "all":
             for c in self._connections:
@@ -403,7 +407,7 @@ class AsyncSessionRelevanceClient:
                 if capable is None or capable(backend):
                     spawn(self._limited(call(backend)))
                 else:
-                    spawn(self._unsupported(relevance, [c]))
+                    spawn(self._unsupported(session_relevance, [c]))
         elif not self._discovery_pending():
             for key, members in self._groups():
                 spawn(group(key, members, None))
@@ -448,7 +452,7 @@ class AsyncSessionRelevanceClient:
         self,
         key: str,
         members: list[ConnectionConfig],
-        relevance: str,
+        session_relevance: str,
         call: Callable[[Backend], Awaitable[SessionRelevanceResult]],
         capable: Callable[[Backend], bool] | None,
         discovery: asyncio.Future[None] | None = None,
@@ -485,15 +489,15 @@ class AsyncSessionRelevanceClient:
             discovery = None
             members = dict(self._groups()).get(key, members)
         if not attempts:
-            return await self._unsupported(relevance, members)
+            return await self._unsupported(session_relevance, members)
         return _summarize(attempts)
 
     async def _unsupported(
-        self, relevance: str, members: list[ConnectionConfig]
+        self, session_relevance: str, members: list[ConnectionConfig]
     ) -> SessionRelevanceResult:
         first = self._backends[members[0].name]
         return SessionRelevanceResult.failure(
-            relevance,
+            session_relevance,
             ResultError(
                 kind="unsupported_feature",
                 backend=first.name,
