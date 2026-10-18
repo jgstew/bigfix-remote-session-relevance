@@ -8,6 +8,7 @@ transport failures to `ResultError`, and stamping result metadata.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -437,9 +438,14 @@ class Backend(ABC):
                     and self.trust is not None
                 ):
                     if self.trust.is_pinned(self.address):
-                        return SessionRelevanceResult.failure(
-                            relevance, await self.trust.mismatch_error(self.address, self.name)
-                        )
+                        error = await self.trust.mismatch_error(self.address, self.name)
+                        if error.code == "pinned_cert_invalid":
+                            # Same cert as pinned, so the cert itself fails
+                            # (expired, or a TLS check): say which.
+                            error = dataclasses.replace(
+                                error, message=f"{error.message}: {err.message}"
+                            )
+                        return SessionRelevanceResult.failure(relevance, error)
                     if attempt == 0 and await self.trust.on_untrusted(self.address):
                         await self.aclose()
                         continue

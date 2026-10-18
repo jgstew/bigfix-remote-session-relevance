@@ -124,12 +124,59 @@ def _openssl(*args: str) -> None:
     subprocess.run(["openssl", *args], check=True, capture_output=True)  # noqa: S603, S607
 
 
+def _der_element(der: bytes, i: int) -> tuple[int, int, int]:
+    """(tag, content start, end) of the DER element at ``i``."""
+    tag, length, i = der[i], der[i + 1], i + 2
+    if length & 0x80:
+        size = length & 0x7F
+        length, i = int.from_bytes(der[i : i + size], "big"), i + size
+    return tag, i, i + length
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    n = len(body)
+    if n < 0x80:
+        return bytes([tag, n]) + body
+    size = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(size)]) + size + body
+
+
+def _make_v1(pem: Path, key: Path) -> None:
+    """Rewrite an extension-less cert as X.509 v1 and re-sign it.
+
+    OpenSSL 4 always writes v3, but real BigFix Explorer certs are v1, and
+    Python's strict verification treats the two differently.
+    """
+    import ssl
+    import subprocess
+
+    der = ssl.PEM_cert_to_DER_cert(pem.read_text())
+    _, start, _ = _der_element(der, 0)
+    _, tbs_start, tbs_end = _der_element(der, start)
+    _, _, alg_end = _der_element(der, tbs_end)
+    version_tag, _, version_end = _der_element(der, tbs_start)
+    assert version_tag == 0xA0  # [0] EXPLICIT version, absent in v1
+    tbs = _der(0x30, der[version_end:tbs_end])
+    tbs_path = pem.with_suffix(".tbs")
+    tbs_path.write_bytes(tbs)
+    signature = subprocess.run(  # noqa: S603
+        ["openssl", "dgst", "-sha256", "-sign", str(key), str(tbs_path)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    ).stdout
+    cert = _der(0x30, tbs + der[tbs_end:alg_end] + _der(0x03, b"\x00" + signature))
+    pem.write_text(ssl.DER_cert_to_PEM_cert(cert))
+
+
 @pytest.fixture(scope="session")
 def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     """Throwaway certs minted per test session; no private key is committed.
 
     ``self_a`` / ``self_b``: two different self-signed certs for 127.0.0.1.
     ``ca`` + ``leaf``: a CA and a leaf it signed, for the CA-valid path.
+    ``expired``: self-signed for 127.0.0.1, valid only in early 2020.
+    ``bigfix``: the shape of the cert a real BigFix Explorer serves (observed):
+    self-signed X.509 *v1*, no extensions, negative serial, CN=BIGFIX.
     """
     if shutil.which("openssl") is None:
         pytest.skip("openssl CLI not found")
@@ -179,7 +226,11 @@ def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "-subj",
         "/CN=127.0.0.1",
     )
-    (d / "leaf.ext").write_text("subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\n")
+    # authorityKeyIdentifier, as on any real CA-issued leaf: Python 3.13+
+    # verifies strictly and rejects a leaf without one.
+    (d / "leaf.ext").write_text(
+        "subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nauthorityKeyIdentifier=keyid\n"
+    )
     _openssl(
         "x509",
         "-req",
@@ -197,6 +248,49 @@ def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "-extfile",
         str(d / "leaf.ext"),
     )
+    _openssl(
+        "req",
+        "-x509",
+        *ec,
+        "-keyout",
+        str(d / "expired.key"),
+        "-out",
+        str(d / "expired.pem"),
+        "-not_before",
+        "20200101000000Z",
+        "-not_after",
+        "20200102000000Z",
+        "-subj",
+        "/CN=bfrsr-expired",
+        "-addext",
+        "subjectAltName=IP:127.0.0.1",
+    )
+    _openssl(
+        "req",
+        "-new",
+        *ec,
+        "-keyout",
+        str(d / "bigfix.key"),
+        "-out",
+        str(d / "bigfix.csr"),
+        "-subj",
+        "/CN=BIGFIX",
+    )
+    _openssl(
+        "x509",
+        "-req",
+        "-in",
+        str(d / "bigfix.csr"),
+        "-signkey",
+        str(d / "bigfix.key"),
+        "-set_serial",
+        "-32598752",
+        "-out",
+        str(d / "bigfix.pem"),
+        "-days",
+        "2",
+    )
+    _make_v1(d / "bigfix.pem", d / "bigfix.key")
     return {p.stem + p.suffix.replace(".", "_"): p for p in d.iterdir()}
 
 

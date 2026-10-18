@@ -19,6 +19,7 @@ from bigfix_remote_session_relevance.trust import (
     TrustStore,
     default_known_certs_path,
     fetch_server_cert,
+    pinned_context,
 )
 
 pytestmark = pytest.mark.tls_local
@@ -133,6 +134,40 @@ async def test_matching_pin_connects_without_asking(
         result = await backend.evaluate("1")
     assert result.ok, result.error
     assert server.requests[0][1] is not None  # credentials sent only after the pin matched
+
+
+async def test_pinned_bigfix_style_cert_connects(tls_server, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    # BigFix Explorer serves a self-signed cert with no extensions and a
+    # negative serial. Python 3.13+ turns on VERIFY_X509_STRICT by default,
+    # which rejected it right after the user pinned it ("invalid CA
+    # certificate"); the pin, not RFC 5280 conformance, is the trust check.
+    server = tls_server("bigfix")
+    known = KnownCerts(tmp_path / "known.toml")
+    known.pin(await fetch_server_cert("127.0.0.1", server.port), trusted_by="prompt")
+    async with _backend(server.port, TrustStore(known)) as backend:
+        result = await backend.evaluate("1")
+    assert result.ok, result.error
+
+
+async def test_pinned_cert_that_stops_validating_says_why(tls_server, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    server = tls_server("expired")
+    known = KnownCerts(tmp_path / "known.toml")
+    known.pin(await fetch_server_cert("127.0.0.1", server.port), trusted_by="prompt")
+    async with _backend(server.port, TrustStore(known)) as backend:
+        result = await backend.evaluate("1")
+    assert result.error is not None
+    assert result.error.code == "pinned_cert_invalid"
+    # OpenSSL's own reason, not a guess: a guess of "expired?" misled when
+    # the real cause was Python 3.13+'s strict checks.
+    assert "certificate has expired" in result.error.message
+    assert "expired?" not in result.error.message
+    assert server.requests == []  # nothing, credentials included, was sent
+
+
+def test_pinned_context_is_not_strict(tls_certs) -> None:  # type: ignore[no-untyped-def]
+    ctx = pinned_context(tls_certs["bigfix_pem"].read_text())
+    assert not ctx.verify_flags & ssl.VERIFY_X509_STRICT
+    assert ctx.verify_flags & ssl.VERIFY_X509_PARTIAL_CHAIN
 
 
 async def test_changed_cert_is_hard_error_and_leaks_no_credentials(

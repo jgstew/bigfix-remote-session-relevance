@@ -100,11 +100,15 @@ def pinned_context(pem: str) -> ssl.SSLContext:
 
     PARTIAL_CHAIN lets OpenSSL accept the pinned leaf itself as an anchor, and
     hostname checking is off because BigFix certs rarely match the URL host;
-    the pin is the stronger check.
+    the pin is the stronger check. X509_STRICT, on by default since Python
+    3.13, is off for the same reason: it rejects the self-signed X.509 v1
+    cert a real BigFix Explorer serves ("invalid CA certificate") even though
+    it is byte-for-byte the cert the user pinned (observed).
     """
     ctx = ssl.create_default_context(cadata=pem)
     ctx.check_hostname = False
     ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
     return ctx
 
 
@@ -258,7 +262,7 @@ class TrustStore:
                 backend=backend,
                 message=(
                     f"pinned certificate for {address.host_port} no longer validates "
-                    f"(expired?) (sha256 {pinned[:16]}…)"
+                    f"(sha256 {pinned[:16]}…)"
                 ),
             )
         return ResultError(
