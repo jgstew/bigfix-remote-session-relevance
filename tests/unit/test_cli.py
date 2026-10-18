@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +13,7 @@ import pytest
 
 from bigfix_remote_session_relevance import cli
 from bigfix_remote_session_relevance.config import ConnectionConfig
+from bigfix_remote_session_relevance.result import SessionRelevanceResult
 from bigfix_remote_session_relevance.trust import CertInfo, KnownCerts
 
 D1 = "1" * 64
@@ -263,3 +267,113 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
         cli.main(["--version"])
     assert info.value.code == 0
     assert capsys.readouterr().out.strip()[0].isdigit()
+
+
+def test_identical_answers_are_summarized(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = _run(
+        ["1"],
+        {
+            "dev-root": httpx.Response(
+                200, json={"result": ["a"], "plural": False, "type": "string"}
+            ),
+            "dev-wr": _wr(),
+        },
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    summary = out.split("\n\n", 1)[1]
+    assert summary.startswith("== summary: 2 results, 1 distinct answer\n2× a\n    ")
+    # Members are listed in arrival order, which the two fakes don't fix.
+    assert sorted(summary.splitlines()[2].strip().split(", ")) == [
+        "dev-root (rest)",
+        "dev-wr (webreports)",
+    ]
+
+
+def test_partial_still_labels_the_answer(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Two deployments are expected, so the one that answers is labelled
+    # as it streams in, before anyone knows the other is unreachable.
+    _run(["1"], {"dev-root": httpx.ConnectError("refused"), "dev-wr": _wr()})
+    captured = capsys.readouterr()
+    assert captured.out == "== dev-wr (webreports) ==\na\n"
+    assert "1 unreachable" in captured.err
+
+
+@pytest.mark.parametrize("flag", ["--all", "-all", "--all-connections"])
+def test_all_is_an_alias_for_all_connections(
+    flag: str, config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    modes: list[str] = []
+    original = cli.SessionRelevanceClient.__init__
+
+    def spy(self: Any, *args: Any, **kwargs: Any) -> None:
+        modes.append(kwargs["mode"])
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(cli.SessionRelevanceClient, "__init__", spy)
+    _run([flag, "1"], {"dev-root": _wr(), "dev-wr": _wr()})
+    assert modes == ["all"]
+
+
+def test_all_is_a_declared_option_not_an_abbreviation() -> None:
+    # argparse would also accept --all as a prefix of --all-connections, but
+    # only until some other --all... option exists.
+    actions = cli.build_parser()._option_string_actions
+    for alias in ("--all", "-all"):
+        assert alias in actions
+        assert "--all-connections" in actions[alias].option_strings
+
+
+def test_bad_explorer_keys_rejected_before_any_connection_is_built(config_path: Path) -> None:
+    built: list[str] = []
+
+    def factory(conn: ConnectionConfig) -> httpx.AsyncBaseTransport:
+        built.append(conn.name)
+        raise AssertionError("must not get this far")
+
+    assert cli.main(["--keys", "id {", "1"], transport_factory=factory) == 64
+    assert built == []
+
+
+def test_unexpected_error_while_streaming_is_not_a_usage_error(
+    config_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: Any, result: Any) -> None:
+        raise ValueError("a bug, not bad input")
+
+    monkeypatch.setattr(cli.HumanRenderer, "add", broken)
+    with pytest.raises(ValueError, match="a bug"):
+        _run(["--backend", "webreports", "1"], {"dev-wr": _wr()})
+
+
+def test_prompts_hold_the_terminal(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TEST_BFRSR_PW")
+    held: list[bool] = []
+
+    def secret(prompt: str) -> str:
+        held.append(cli._TERMINAL.locked())
+        return "pw"
+
+    routes = {"dev-root": httpx.Response(200, json={"result": ["x"], "plural": False})}
+    _run(["--backend", "rest", "1"], routes, getpass_fn=secret, interactive=True)
+    assert held == [True]
+
+
+def test_streamed_output_waits_while_a_prompt_holds_the_terminal(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = SessionRelevanceResult.from_values("q", ["1"], connection="a", backend="rest")
+    args = argparse.Namespace(raw=False, verbose=0)
+    with cli._TERMINAL:
+        worker = threading.Thread(
+            target=cli._print_stream, args=(iter([result]), args), kwargs={"labelled": False}
+        )
+        worker.start()
+        time.sleep(0.1)
+        assert capsys.readouterr().out == ""
+    worker.join(2)
+    assert capsys.readouterr().out == "1\n"

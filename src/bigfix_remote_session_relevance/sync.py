@@ -4,18 +4,24 @@ The async client runs on its own event loop in a background thread (an
 anyio blocking portal), so the sync API also works when the caller is
 already inside a running loop, such as a notebook or an async web app,
 where ``asyncio.run`` would fail.
+
+The ``*_stream`` methods hand each result to the calling thread through a
+queue the moment the loop thread receives it.
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import AbstractContextManager
+import queue
+from collections.abc import AsyncGenerator, Callable, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, aclosing
 from typing import TYPE_CHECKING, Any, Self, TypeVar
 
 from anyio.from_thread import BlockingPortal, start_blocking_portal
 
+from .backends.explorer_extras import explorer_body
 from .client import AsyncSessionRelevanceClient
+from .result import SessionRelevanceResult
 from .results import SessionRelevanceResults
 
 if TYPE_CHECKING:
@@ -48,6 +54,10 @@ class SessionRelevanceClient:
         result: SessionRelevanceResults = self._call(self._client.evaluate, relevance)
         return result
 
+    def evaluate_stream(self, relevance: str) -> Iterator[SessionRelevanceResult]:
+        """`evaluate`, yielding each result as it lands (completion order)."""
+        return self._iterate(self._client.evaluate_stream, relevance)
+
     def evaluate_many(self, relevances: Iterable[str]) -> list[SessionRelevanceResults]:
         result: list[SessionRelevanceResults] = self._call(
             self._client.evaluate_many, list(relevances)
@@ -65,6 +75,58 @@ class SessionRelevanceClient:
             self._client.evaluate_explorer, relevance, keys=keys, filters=filters
         )
         return result
+
+    def evaluate_explorer_stream(
+        self,
+        relevance: str,
+        *,
+        keys: str | None = None,
+        filters: Mapping[str, str] | None = None,
+    ) -> Iterator[SessionRelevanceResult]:
+        explorer_body(relevance, keys, filters)  # invalid input raises here, not mid-stream
+        return self._iterate(
+            self._client.evaluate_explorer_stream, relevance, keys=keys, filters=filters
+        )
+
+    def result_count(self) -> int | None:
+        result: int | None = self._call(self._client.result_count)
+        return result
+
+    def _iterate(
+        self, stream: Callable[..., AsyncGenerator[T]], *args: Any, **kwargs: Any
+    ) -> Iterator[T]:
+        if self._portal is None:
+            raise RuntimeError("SessionRelevanceClient is closed")
+        return self._drain(self._portal, functools.partial(stream, *args, **kwargs))
+
+    @staticmethod
+    def _drain(portal: BlockingPortal, stream: Callable[[], AsyncGenerator[T]]) -> Iterator[T]:
+        # A generator, so nothing starts until the first next(): an iterator
+        # that is created and dropped never queries anything.
+        items: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+        async def pump() -> None:
+            try:
+                async with aclosing(stream()) as results:
+                    async for item in results:
+                        items.put(("item", item))
+            except Exception as exc:  # noqa: BLE001 - re-raised in the caller's thread
+                items.put(("error", exc))
+            finally:
+                items.put(("done", None))
+
+        future = portal.start_task_soon(pump)
+        try:
+            while True:
+                kind, value = items.get()
+                if kind == "done":
+                    return
+                if kind == "error":
+                    raise value
+                yield value
+        finally:
+            # An abandoned iteration cancels the queries still running.
+            future.cancel()
 
     def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         result: dict[str, str | None] = self._call(self._client.discover_deployments, force=force)

@@ -122,6 +122,8 @@ line-length = 100
 
 [tool.ruff.lint]
 extend-select = ["B", "I", "UP", "SIM", "RUF", "ASYNC", "S"]
+# The CLI summary's "2× answer" counts, as in bigfix-remote-client-relevance.
+allowed-confusables = ["×"]
 
 [tool.ruff.lint.per-file-ignores]
 # assert is the point of a test; fixture credentials are fake.

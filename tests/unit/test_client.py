@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote_plus
 
 import httpx
 import pytest
@@ -434,3 +435,144 @@ async def test_evaluate_explorer_uses_only_capable_connections() -> None:
     assert d2_error is not None
     assert d2_error.kind == "unsupported_feature"
     assert "d1-wr" not in router.calls and "d2-wr" not in router.calls
+
+
+async def test_evaluate_stream_yields_in_completion_order() -> None:
+    fast_done = asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.wait_for(fast_done.wait(), timeout=2)
+        return _ok(1)
+
+    conns = [_conn("d1", "rest", D1), _conn("d2", "rest", D2)]
+    router = Router({"d1": slow, "d2": [_ok(2)]})
+    seen: list[str] = []
+    async with _client(conns, router) as client:
+        async for result in client.evaluate_stream("q"):
+            seen.append(str(result.connection))
+            fast_done.set()  # d1 can only answer after d2's result was handed over
+        # The batch form keeps deployment order regardless of who answers first.
+        fast_done.clear()
+        batch = client.evaluate("q")
+        await asyncio.sleep(0)
+        fast_done.set()
+        assert [str(r.connection) for r in await batch] == ["d1", "d2"]
+    assert seen == ["d2", "d1"]
+
+
+async def test_evaluate_stream_mode_all_and_explorer() -> None:
+    conns = [_conn("a", "rest", D1), _conn("b", "webreports", D1)]
+    router = Router({"a": [_ok(1)], "b": [_ok(1)]})
+    async with _client(conns, router, mode="all", discover=False) as client:
+        streamed = [r async for r in client.evaluate_stream("q")]
+        assert sorted(str(r.connection) for r in streamed) == ["a", "b"]
+        explorer = [r async for r in client.evaluate_explorer_stream("q", keys="id")]
+    kinds = {str(r.connection): r.error.kind if r.error else None for r in explorer}
+    assert kinds["b"] == "unsupported_feature"
+
+
+async def test_evaluate_stream_stops_remaining_work_when_abandoned() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def hang(request: httpx.Request) -> httpx.Response:
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return _ok()  # pragma: no cover
+
+    conns = [_conn("d1", "rest", D1), _conn("d2", "rest", D2)]
+    router = Router({"d1": hang, "d2": [_ok()]})
+    async with _client(conns, router) as client:
+        stream = client.evaluate_stream("q")
+        first = await anext(stream)
+        assert first.connection == "d2"
+        await asyncio.wait_for(started.wait(), timeout=2)
+        await stream.aclose()
+    assert cancelled.is_set()
+
+
+def _is_discovery(request: httpx.Request) -> bool:
+    return DEPLOYMENT_ID_RELEVANCE in unquote_plus(request.content.decode())
+
+
+async def test_known_deployments_stream_before_discovery_finishes() -> None:
+    release = asyncio.Event()
+
+    async def late(request: httpx.Request) -> httpx.Response:
+        if _is_discovery(request):
+            await asyncio.wait_for(release.wait(), timeout=2)
+            return _ok(D2, "string")
+        return _ok(2)
+
+    conns = [_conn("known", "rest", D1), _conn("late", "rest", None)]
+    router = Router({"known": [_ok(1)], "late": late})
+    seen: list[str] = []
+    async with _client(conns, router, record_deployment_ids=False) as client:
+        async for result in client.evaluate_stream("q"):
+            seen.append(str(result.connection))
+            release.set()  # discovery of "late" only ends after "known" streamed
+    assert seen == ["known", "late"]
+
+
+async def test_late_discovered_member_still_serves_as_failover() -> None:
+    def late(request: httpx.Request) -> httpx.Response:
+        return _ok(D1, "string") if _is_discovery(request) else _ok(7)
+
+    conns = [_conn("d1-root", "rest", D1), _conn("d1-late", "rest", None)]
+    router = Router({"d1-root": [REFUSED], "d1-late": late})
+    async with _client(conns, router, record_deployment_ids=False) as client:
+        (result,) = await client.evaluate("q")
+    assert result.ok
+    assert result.connection == "d1-late"
+    assert result.answers == (7,)
+
+
+async def test_batch_order_is_group_order_even_when_groups_start_late() -> None:
+    def late(request: httpx.Request) -> httpx.Response:
+        return _ok(D2, "string") if _is_discovery(request) else _ok(2)
+
+    conns = [_conn("first", "rest", None), _conn("second", "rest", D1)]
+    router = Router({"first": late, "second": [_ok(1)]})
+    async with _client(conns, router, record_deployment_ids=False) as client:
+        results = await client.evaluate("q")
+    assert [str(r.connection) for r in results] == ["first", "second"]
+
+
+async def test_result_count() -> None:
+    conns = [_conn("a", "rest", D1), _conn("b", "webreports", D1), _conn("c", "rest", None)]
+
+    def disc(request: httpx.Request) -> httpx.Response:
+        return _ok(D2, "string")
+
+    router = Router({"a": [_ok()], "b": [_ok()], "c": disc})
+    async with _client(conns, router, record_deployment_ids=False) as client:
+        assert client.result_count() is None  # depends on c's deployment id
+        await client.evaluate("q")
+        assert client.result_count() == 2
+    async with _client(conns, router, discover=False) as client:
+        assert client.result_count() == 2
+    async with _client(conns, router, mode="all") as client:
+        assert client.result_count() == 3
+
+
+async def test_explorer_stream_validates_on_call() -> None:
+    conns = [_conn("a", "rest", D1)]
+    router = Router({"a": [_ok()]})
+    async with _client(conns, router) as client:
+        with pytest.raises(ValueError):
+            client.evaluate_explorer_stream("q", keys="id {")
+    assert router.calls == []
+
+
+async def test_evaluate_stream_raise_errors_raises_at_the_failure() -> None:
+    conns = [_conn("d1", "rest", D1)]
+    error = httpx.Response(200, json={"result": [], "error": "bad"})
+    router = Router({"d1": [error]})
+    async with _client(conns, router, raise_errors=True) as client:
+        with pytest.raises(RelevanceError):
+            async for _ in client.evaluate_stream("q"):
+                pass  # pragma: no cover

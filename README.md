@@ -61,7 +61,7 @@ Passwords can live in the file, or better, in environment variables named by
 ```bash
 bigfix-remote-session-relevance "names of bes sites"            # one answer per line
 bigfix-remote-session-relevance --json "ids of bes computers"   # list of result objects
-bigfix-remote-session-relevance --all-connections "now"         # every connection, not one per deployment
+bigfix-remote-session-relevance --all "now"                     # every connection, not one per deployment (= -all, --all-connections)
 bigfix-remote-session-relevance --backend webreports --raw "1"  # raw server response
 bigfix-remote-session-relevance --keys "id name" \
     "(id of it, name of it) of bes computers"                  # Explorer extras
@@ -71,6 +71,26 @@ bigfix-remote-session-relevance --show-certs | --trust-cert NAME | --forget-cert
 ```
 
 Answers go to stdout; errors and `-v` metadata go to stderr.
+
+Results stream in as each deployment answers (completion order), so a slow
+or unreachable server no longer holds up the ones that already finished.
+Plain text and `--raw` stream; `--json` is one document, so it prints once
+everything is in. Exit codes are always decided after the full fan-out.
+
+When several results come back, plain text ends with a summary that
+collapses identical answers, most common first:
+
+```
+== summary: 3 results, 2 distinct answers
+2× 1234
+    prod-root (rest), dr-root (rest)
+1× 87
+    lab-wr (webreports)
+```
+
+Results are grouped by answers, answer type and error (not timing, backend
+or server), and identical errors collapse too. The summary only appears when
+it actually collapses something.
 
 | Exit code | Meaning |
 |---|---|
@@ -98,6 +118,9 @@ from bigfix_remote_session_relevance import AsyncSessionRelevanceClient
 async with AsyncSessionRelevanceClient() as client:  # default config
     results = await client.evaluate("number of bes computers")
     results.raise_for_error()  # opt into exceptions
+
+    async for result in client.evaluate_stream("number of bes computers"):
+        print(result.connection, result.answers)  # as each deployment answers
     keyed = await client.evaluate_explorer(
         "(id of it, name of it) of bes computers", keys="id name"
     )

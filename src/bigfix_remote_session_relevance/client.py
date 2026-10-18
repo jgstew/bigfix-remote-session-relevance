@@ -8,14 +8,17 @@ failures, never on a relevance error (the same query fails everywhere)
 and never around a changed pinned certificate (a security signal).
 
 Mode ``all`` queries every enabled connection and returns each result.
+
+The ``*_stream`` methods yield the same results in completion order, each
+the moment it lands, so one slow deployment does not hold up the others.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from typing import TYPE_CHECKING, Literal, Self
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import httpx
 
@@ -140,7 +143,18 @@ class AsyncSessionRelevanceClient:
 
     async def evaluate(self, relevance: str) -> SessionRelevanceResults:
         """Plain session relevance on every deployment (or connection, in ``all`` mode)."""
-        return await self._fan_out(relevance, lambda b: b.evaluate(relevance), capable=None)
+        return await self._collect(
+            self._stream(relevance, self._plain(relevance), capable=None, streaming=False)
+        )
+
+    def evaluate_stream(self, relevance: str) -> AsyncGenerator[SessionRelevanceResult]:
+        """`evaluate`, yielding each result as it lands (completion order).
+
+        Abandoning the iteration early (``break``, or ``aclose()``) cancels
+        the queries still running. With ``raise_errors`` it raises at the
+        first failed result.
+        """
+        return self._stream(relevance, self._plain(relevance), capable=None)
 
     async def evaluate_many(self, relevances: Iterable[str]) -> list[SessionRelevanceResults]:
         return list(await asyncio.gather(*(self.evaluate(r) for r in relevances)))
@@ -153,14 +167,32 @@ class AsyncSessionRelevanceClient:
         filters: Mapping[str, str] | None = None,
     ) -> SessionRelevanceResults:
         """Additive Explorer extras, on connections that can reach Explorer only."""
-        explorer_body(relevance, keys, filters)  # validate once, up front
+        call = self._explorer(relevance, keys, filters)
+        return await self._collect(
+            self._stream(relevance, call, capable=supports_explorer_extras, streaming=False)
+        )
 
-        def call(backend: Backend) -> Awaitable[SessionRelevanceResult]:
-            return backend.evaluate_explorer(  # type: ignore[attr-defined, no-any-return]
-                relevance, keys=keys, filters=filters
-            )
+    def evaluate_explorer_stream(
+        self,
+        relevance: str,
+        *,
+        keys: str | None = None,
+        filters: Mapping[str, str] | None = None,
+    ) -> AsyncGenerator[SessionRelevanceResult]:
+        """`evaluate_explorer`, yielding each result as it lands. Invalid
+        keys or filters raise here, before anything is queried."""
+        call = self._explorer(relevance, keys, filters)
+        return self._stream(relevance, call, capable=supports_explorer_extras)
 
-        return await self._fan_out(relevance, call, capable=supports_explorer_extras)
+    def result_count(self) -> int | None:
+        """How many results an evaluation returns: one per deployment, or per
+        connection in ``all`` mode. ``None`` while that still depends on
+        deployment ids not discovered yet (the first evaluation finds them)."""
+        if self.mode == "all":
+            return len(self._connections)
+        if self._discovery_pending():
+            return None
+        return len(self._groups())
 
     async def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         """Ask every selected connection for its deployment id (and record it)."""
@@ -193,6 +225,13 @@ class AsyncSessionRelevanceClient:
             self._semaphore = asyncio.Semaphore(self._max_concurrency)
         async with self._semaphore:
             return await awaitable
+
+    def _discovery_pending(self) -> bool:
+        return (
+            self.discover
+            and not self._discovered
+            and any(not self._deployment_ids[c.name] for c in self._connections)
+        )
 
     async def _maybe_discover(self) -> None:
         if not self.discover or self._discovered:
@@ -254,34 +293,113 @@ class AsyncSessionRelevanceClient:
             )
         return list(groups.items())
 
-    async def _fan_out(
+    @staticmethod
+    def _plain(relevance: str) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+        return lambda backend: backend.evaluate(relevance)
+
+    @staticmethod
+    def _explorer(
+        relevance: str, keys: str | None, filters: Mapping[str, str] | None
+    ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+        explorer_body(relevance, keys, filters)  # validate once, up front
+
+        def call(backend: Backend) -> Awaitable[SessionRelevanceResult]:
+            return backend.evaluate_explorer(  # type: ignore[attr-defined, no-any-return]
+                relevance, keys=keys, filters=filters
+            )
+
+        return call
+
+    async def _collect(
+        self, stream: AsyncIterator[SessionRelevanceResult]
+    ) -> SessionRelevanceResults:
+        landed = [result async for result in stream]
+        # Back in group (or connection) order, whatever order they landed in.
+        if self.mode == "all":
+            position = {c.name: i for i, c in enumerate(self._connections)}
+        else:
+            position = {c.name: i for i, (_, members) in enumerate(self._groups()) for c in members}
+        landed.sort(key=lambda r: position.get(str(r.connection), len(position)))
+        out = SessionRelevanceResults(landed)
+        if self.raise_errors:
+            out.raise_for_error()
+        return out
+
+    async def _stream(
         self,
         relevance: str,
         call: Callable[[Backend], Awaitable[SessionRelevanceResult]],
         *,
         capable: Callable[[Backend], bool] | None,
-    ) -> SessionRelevanceResults:
+        streaming: bool = True,
+    ) -> AsyncGenerator[SessionRelevanceResult]:
+        """Every result as it lands.
+
+        Deployments whose ids are already known start at once; only
+        connections still being discovered wait for discovery, so one
+        unreachable, undiscovered server does not hold up the rest.
+        """
         self._ensure_backends()
+        finished: asyncio.Queue[asyncio.Future[SessionRelevanceResult | None]] = asyncio.Queue()
+        running: set[asyncio.Future[SessionRelevanceResult | None]] = set()
+        helpers: list[asyncio.Future[None]] = []
+
+        def spawn(work: Awaitable[SessionRelevanceResult | None]) -> None:
+            task = asyncio.ensure_future(work)
+            running.add(task)
+            task.add_done_callback(finished.put_nowait)
+
+        def group(
+            key: str, members: list[ConnectionConfig], discovery: asyncio.Future[None] | None
+        ) -> Awaitable[SessionRelevanceResult]:
+            return self._run_group(key, members, relevance, call, capable, discovery)
+
         if self.mode == "all":
-            tasks = [
-                self._limited(call(self._backends[c.name]))
-                if capable is None or capable(self._backends[c.name])
-                else self._unsupported(relevance, [c])
-                for c in self._connections
-            ]
-            results = await asyncio.gather(*tasks)
+            for c in self._connections:
+                backend = self._backends[c.name]
+                if capable is None or capable(backend):
+                    spawn(self._limited(call(backend)))
+                else:
+                    spawn(self._unsupported(relevance, [c]))
+        elif not self._discovery_pending():
+            for key, members in self._groups():
+                spawn(group(key, members, None))
         else:
-            await self._maybe_discover()
-            results = await asyncio.gather(
-                *(
-                    self._run_group(key, members, relevance, call, capable)
-                    for key, members in self._groups()
-                )
-            )
-        out = SessionRelevanceResults(results)
-        if self.raise_errors:
-            out.raise_for_error()
-        return out
+            discovery = asyncio.ensure_future(self._maybe_discover())
+            helpers.append(discovery)
+            # Before discovery, a connection without an id is a group of its
+            # own, keyed by name; every group keyed by an id is fully known.
+            started = set()
+            for key, members in self._groups():
+                if self._deployment_ids[members[0].name]:
+                    started.add(key)
+                    spawn(group(key, members, discovery))
+
+            async def discovered_groups() -> None:
+                await discovery
+                for key, members in self._groups():
+                    if key not in started:
+                        spawn(group(key, members, None))
+
+            spawn(discovered_groups())
+
+        try:
+            while running:
+                task = await finished.get()
+                running.discard(task)
+                result = task.result()
+                if result is None:
+                    continue
+                if streaming and self.raise_errors:
+                    result.raise_for_error()
+                yield result
+        finally:
+            # A consumer that stops early (break, an exception, raise_errors)
+            # must not leave queries running with nobody to collect them.
+            leftovers: list[asyncio.Future[Any]] = [*running, *helpers]
+            for task in leftovers:
+                task.cancel()
+            await asyncio.gather(*leftovers, return_exceptions=True)
 
     async def _run_group(
         self,
@@ -290,26 +408,41 @@ class AsyncSessionRelevanceClient:
         relevance: str,
         call: Callable[[Backend], Awaitable[SessionRelevanceResult]],
         capable: Callable[[Backend], bool] | None,
+        discovery: asyncio.Future[None] | None = None,
     ) -> SessionRelevanceResult:
-        candidates = [c for c in members if capable is None or capable(self._backends[c.name])]
-        if not candidates:
-            return await self._unsupported(relevance, members)
         attempts: list[SessionRelevanceResult] = []
-        for index, conn in enumerate(candidates):
-            result = await self._limited(call(self._backends[conn.name]))
-            if result.ok:
-                self._preferred[key] = conn.name
-                return result
-            attempts.append(result)
-            if not should_fail_over(result.error):
-                return result
-            if index + 1 < len(candidates):
-                log.info(
-                    "%s: %s; trying %s for this deployment",
-                    conn.name,
-                    result.error.kind if result.error else "error",
-                    candidates[index + 1].name,
-                )
+        tried: set[str] = set()
+        while True:
+            candidates = [
+                c
+                for c in members
+                if c.name not in tried and (capable is None or capable(self._backends[c.name]))
+            ]
+            for index, conn in enumerate(candidates):
+                tried.add(conn.name)
+                result = await self._limited(call(self._backends[conn.name]))
+                if result.ok:
+                    self._preferred[key] = conn.name
+                    return result
+                attempts.append(result)
+                if not should_fail_over(result.error):
+                    return result
+                if index + 1 < len(candidates):
+                    log.info(
+                        "%s: %s; trying %s for this deployment",
+                        conn.name,
+                        result.error.kind if result.error else "error",
+                        candidates[index + 1].name,
+                    )
+            if discovery is None:
+                break
+            # Connections still being discovered may turn out to belong to
+            # this deployment: they are its remaining failover candidates.
+            await asyncio.shield(discovery)
+            discovery = None
+            members = dict(self._groups()).get(key, members)
+        if not attempts:
+            return await self._unsupported(relevance, members)
         return _summarize(attempts)
 
     async def _unsupported(
@@ -350,6 +483,16 @@ def _summarize(attempts: list[SessionRelevanceResult]) -> SessionRelevanceResult
         backend=primary.error.backend,
         http_status=primary.error.http_status,
         detail=primary.error.detail,
-        message=f"{primary.error.message} (tried {tried})",
+        message=f"{primary.error.message}{_TRIED}{tried})",
     )
     return primary.replace(error=error)
+
+
+_TRIED = " (tried "
+
+
+def without_attempts(message: str) -> str:
+    """An error message minus the connections `_summarize` lists as tried,
+    which differ per deployment even when the failure itself is the same."""
+    head, sep, _ = message.rpartition(_TRIED)
+    return head if sep and message.endswith(")") else message

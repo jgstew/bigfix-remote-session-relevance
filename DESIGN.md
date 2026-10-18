@@ -234,6 +234,22 @@ server's text.
   outage). A group where everything failed returns one result, preferring a
   non-unreachable error, with every connection tried listed in the message.
 - **`all`**: every enabled connection, each result returned.
+- **Streaming**: `evaluate_stream` / `evaluate_explorer_stream` yield the
+  same results in completion order; the batch forms return them in group
+  (or connection) order. Deployments whose ids are already known start at
+  once; only connections still being discovered wait for discovery, and a
+  known deployment whose connections all fail waits for it too, since a
+  newly discovered connection may be its failover. Abandoning a stream
+  cancels the queries still running. `result_count()` says how many results
+  to expect, or `None` while that depends on undiscovered ids (the CLI then
+  holds its first answer until it knows whether to label sections).
+  Interactive prompts and streamed output share one lock, so answers never
+  land in the middle of a password or certificate prompt.
+- **CLI summary**: after a labelled plain-text run, results with identical
+  answers, answer type and error (ignoring the connections a failover
+  tried) are collapsed, most common first. Printed
+  to stdout only when something collapses. Unreachable results hidden
+  without `-v` are left out of it.
 
 ## TLS: trust on first use
 

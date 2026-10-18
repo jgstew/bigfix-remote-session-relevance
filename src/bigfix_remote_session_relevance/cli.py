@@ -13,14 +13,18 @@ import getpass
 import json
 import logging
 import sys
-from collections.abc import Callable
+import threading
+from collections.abc import Callable, Iterable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, NoReturn
 
+from .backends.explorer_extras import explorer_body
 from .client import TransportFactory
 from .config import Config, load_config, redacted_summary, resolve_config_path
 from .exceptions import ConfigError
-from .render import EXIT_USAGE, exit_code, render_human
+from .render import EXIT_USAGE, HumanRenderer, exit_code, format_error
+from .result import SessionRelevanceResult
+from .results import SessionRelevanceResults
 from .server_address import normalize_server
 from .sync import SessionRelevanceClient
 from .trust import CertInfo, KnownCerts, TrustStore, fetch_server_cert
@@ -81,6 +85,8 @@ def build_parser() -> argparse.ArgumentParser:
     sel = p.add_argument_group("selection")
     sel.add_argument(
         "--all-connections",
+        "--all",
+        "-all",
         action="store_true",
         help="query every connection, not one per deployment",
     )
@@ -156,8 +162,11 @@ def main(
         if not config.connections:
             return _no_connections(args, is_interactive, ask, secret)
         config = _apply_timeouts(config, args)
+        # Prompts run on the client's loop thread while answers stream out on
+        # this one; holding the terminal keeps answers from landing mid-prompt.
+        ask_held, secret_held = _holding_terminal(ask), _holding_terminal(secret)
         trust = TrustStore(
-            callback=(lambda info: _prompt_trust(info, ask)) if is_interactive else None,
+            callback=(lambda info: _prompt_trust(info, ask_held)) if is_interactive else None,
             trust_on_first_use=not args.no_tofu,
         )
         client_kwargs: dict[str, Any] = {
@@ -165,18 +174,39 @@ def main(
             "connections": args.connection,
             "backends": args.backend,
             "trust": trust,
-            "prompt": secret if is_interactive else None,
+            "prompt": secret_held if is_interactive else None,
             "transport_factory": transport_factory,
         }
         if args.discover_deployments:
             return _discover(config, client_kwargs)
         relevance = _read_relevance(args.relevance)
         filters = _parse_filters(args.filter)
+        explorer = args.keys is not None or filters is not None
+        if explorer:
+            # Bad input is rejected before any connection, prompt or discovery.
+            try:
+                explorer_body(relevance, args.keys, filters)
+            except (ValueError, TypeError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return EXIT_USAGE
         with SessionRelevanceClient(config, **client_kwargs) as client:
-            if args.keys is not None or filters is not None:
-                results = client.evaluate_explorer(relevance, keys=args.keys, filters=filters)
+            if args.json:
+                # One JSON document needs every result in; it alone waits.
+                results = (
+                    client.evaluate_explorer(relevance, keys=args.keys, filters=filters)
+                    if explorer
+                    else client.evaluate(relevance)
+                )
+                print(json.dumps(results.to_dict(include_raw=args.raw), indent=2))
             else:
-                results = client.evaluate(relevance)
+                stream = (
+                    client.evaluate_explorer_stream(relevance, keys=args.keys, filters=filters)
+                    if explorer
+                    else client.evaluate_stream(relevance)
+                )
+                count = client.result_count()
+                labelled = None if count is None else count > 1
+                results = _print_stream(stream, args, labelled=labelled)
     except _UsageError as exc:
         parser.print_usage(sys.stderr)
         print(f"error: {exc}", file=sys.stderr)
@@ -184,24 +214,47 @@ def main(
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    except (ValueError, TypeError) as exc:  # invalid Explorer keys/filters
-        print(f"error: {exc}", file=sys.stderr)
-        return EXIT_USAGE
 
-    if args.json:
-        print(json.dumps(results.to_dict(include_raw=args.raw), indent=2))
-    elif args.raw:
-        for r in results:
-            if r.raw is not None:
-                print(r.raw.text)
-            elif r.error is not None:
-                print(f"{r.connection}: {r.error.kind} error: {r.error.message}", file=sys.stderr)
-    else:
-        render_human(results, out=sys.stdout, err=sys.stderr, verbose=args.verbose)
     return exit_code(results)
 
 
 # -- helpers -------------------------------------------------------------------------
+
+
+# Held while a prompt waits for input and while a result is written, so the two
+# never interleave on the terminal.
+_TERMINAL = threading.Lock()
+
+
+def _holding_terminal(fn: InputFn) -> InputFn:
+    def held(prompt: str) -> str:
+        with _TERMINAL:
+            return fn(prompt)
+
+    return held
+
+
+def _print_stream(
+    stream: Iterable[SessionRelevanceResult], args: argparse.Namespace, *, labelled: bool | None
+) -> SessionRelevanceResults:
+    """Print each result as it lands; exit codes still wait for all of them."""
+    collected: list[SessionRelevanceResult] = []
+    renderer = HumanRenderer(
+        out=sys.stdout, err=sys.stderr, verbose=args.verbose, labelled=labelled
+    )
+    for r in stream:
+        collected.append(r)
+        with _TERMINAL:
+            if not args.raw:
+                renderer.add(r)
+            elif r.raw is not None:
+                print(r.raw.text, flush=True)
+            elif r.error is not None:
+                print(format_error(r), file=sys.stderr, flush=True)
+    if not args.raw:
+        with _TERMINAL:
+            renderer.close()
+    return SessionRelevanceResults(collected)
 
 
 def _stderr_input(prompt: str) -> str:
