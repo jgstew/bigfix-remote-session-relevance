@@ -144,7 +144,7 @@ def _der(tag: int, body: bytes) -> bytes:
 def _make_v1(pem: Path, key: Path) -> None:
     """Rewrite an extension-less cert as X.509 v1 and re-sign it.
 
-    OpenSSL 4 always writes v3, but real BigFix Explorer certs are v1, and
+    Newer OpenSSL always writes v3, but real BigFix Explorer certs are v1, and
     Python's strict verification treats the two differently.
     """
     import ssl
@@ -155,7 +155,8 @@ def _make_v1(pem: Path, key: Path) -> None:
     _, tbs_start, tbs_end = _der_element(der, start)
     _, _, alg_end = _der_element(der, tbs_end)
     version_tag, _, version_end = _der_element(der, tbs_start)
-    assert version_tag == 0xA0  # [0] EXPLICIT version, absent in v1
+    if version_tag != 0xA0:  # no [0] EXPLICIT version: already v1 (OpenSSL < 3.2)
+        return
     tbs = _der(0x30, der[version_end:tbs_end])
     tbs_path = pem.with_suffix(".tbs")
     tbs_path.write_bytes(tbs)
@@ -248,22 +249,46 @@ def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "-extfile",
         str(d / "leaf.ext"),
     )
+    # `openssl ca` rather than `req -not_after`: the latter is OpenSSL 3.4+,
+    # and CI's Ubuntu ships 3.0.
     _openssl(
         "req",
-        "-x509",
+        "-new",
         *ec,
         "-keyout",
         str(d / "expired.key"),
         "-out",
-        str(d / "expired.pem"),
-        "-not_before",
-        "20200101000000Z",
-        "-not_after",
-        "20200102000000Z",
+        str(d / "expired.csr"),
         "-subj",
         "/CN=bfrsr-expired",
-        "-addext",
-        "subjectAltName=IP:127.0.0.1",
+    )
+    ca_dir = d / "expired-ca"
+    ca_dir.mkdir()
+    (ca_dir / "index.txt").write_text("")
+    (ca_dir / "serial").write_text("01\n")
+    (ca_dir / "ca.cnf").write_text(
+        "[ca]\ndefault_ca = expired\n"
+        f"[expired]\ndatabase = {ca_dir / 'index.txt'}\nserial = {ca_dir / 'serial'}\n"
+        f"new_certs_dir = {ca_dir}\ndefault_md = sha256\npolicy = any\n"
+        "[any]\ncommonName = supplied\n"
+    )
+    _openssl(
+        "ca",
+        "-batch",
+        "-selfsign",
+        "-config",
+        str(ca_dir / "ca.cnf"),
+        "-keyfile",
+        str(d / "expired.key"),
+        "-in",
+        str(d / "expired.csr"),
+        "-out",
+        str(d / "expired.pem"),
+        "-startdate",
+        "20200101000000Z",
+        "-enddate",
+        "20200102000000Z",
+        "-notext",
     )
     _openssl(
         "req",
