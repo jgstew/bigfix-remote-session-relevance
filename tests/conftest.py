@@ -121,7 +121,15 @@ def recording_transport() -> type[RecordingTransport]:
 def _openssl(*args: str) -> None:
     import subprocess
 
-    subprocess.run(["openssl", *args], check=True, capture_output=True)  # noqa: S603, S607
+    done = subprocess.run(  # noqa: S603
+        ["openssl", *args],  # noqa: S607
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode:
+        # OpenSSL's own message: CI logs otherwise show only the exit status.
+        raise RuntimeError(f"openssl {args[0]} failed: {done.stderr.strip()}")
 
 
 def _der_element(der: bytes, i: int) -> tuple[int, int, int]:
@@ -268,8 +276,11 @@ def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     (ca_dir / "serial").write_text("01\n")
     (ca_dir / "ca.cnf").write_text(
         "[ca]\ndefault_ca = expired\n"
-        f"[expired]\ndatabase = {ca_dir / 'index.txt'}\nserial = {ca_dir / 'serial'}\n"
-        f"new_certs_dir = {ca_dir}\ndefault_md = sha256\npolicy = any\n"
+        # Forward slashes: OpenSSL's config parser treats a backslash as an escape,
+        # which mangles Windows paths; OpenSSL on Windows accepts "/".
+        f"[expired]\ndatabase = {(ca_dir / 'index.txt').as_posix()}\n"
+        f"serial = {(ca_dir / 'serial').as_posix()}\n"
+        f"new_certs_dir = {ca_dir.as_posix()}\ndefault_md = sha256\npolicy = any\n"
         "[any]\ncommonName = supplied\n"
     )
     _openssl(
