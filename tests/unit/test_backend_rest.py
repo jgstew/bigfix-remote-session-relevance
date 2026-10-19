@@ -353,7 +353,7 @@ async def test_invalid_json_error_kept_when_explorer_still_down(
     ]
 
 
-async def test_unparseable_form_response_is_not_retried(recording_transport: type) -> None:
+async def test_unparsable_form_response_is_not_retried(recording_transport: type) -> None:
     # Our own "invalid JSON: ..." response_format error (a garbled body) is
     # not the server's 400 "Invalid JSON" and says nothing about Explorer.
     ok = httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
