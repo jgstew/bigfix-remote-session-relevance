@@ -126,10 +126,10 @@ it actually collapses something.
 | Exit code | Meaning |
 |---|---|
 | 0 | every queried deployment answered |
-| 1 | a session relevance error |
-| 2 | nothing reachable, or credentials rejected everywhere |
+| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin |
+| 2 | nothing reachable, or credentials rejected everywhere; `--discover-deployments` found no id |
 | 3 | partial: some deployments failed |
-| 64 | usage or configuration error |
+| 64 | usage or configuration error, or no connection matched `--connection` / `--backend` |
 
 ## Library
 
@@ -167,7 +167,8 @@ backend. `escape_answer()` / `unescape_answer()` convert between the two;
 
 `SessionRelevanceClient` has the same methods, synchronously, and works even
 inside a running event loop. Single backends (`RestBackend`,
-`ExplorerBackend`, `WebReportsBackend`) can be used directly too.
+`ExplorerBackend`, `WebReportsBackend`, `SaasBackend`) can be used directly
+too.
 
 The query is always named `session_relevance` (never a bare `relevance`, which
 could mean client relevance): `result.session_relevance`, the `to_dict()` /
@@ -187,20 +188,38 @@ From 1.0.0, releases follow [semantic versioning](https://semver.org/).
 Removing or changing any of these needs a new major version:
 
 - **Library:** the names in `bigfix_remote_session_relevance.__all__` and
-  their documented parameters, keyword names included.
+  the parameters in their signatures, keyword names included, except the
+  provisional names below. `transport` / `transport_factory` are testing
+  hooks typed with httpx's classes and are not covered.
 - **Results:** the `SessionRelevanceResult` and `ResultError` fields, the
   `to_dict()` keys and value types, the error kinds (`ERROR_KINDS`) and the
   exception class `raise_for_error()` raises for each.
-- **CLI:** flags, exit codes, and the `--json` output (`to_dict()` per result).
-- **Config file:** the keys it accepts and what they mean.
+- **CLI:** flags, the exit codes in the table above, and the `--json` output
+  (`to_dict()` per result).
+- **Config file:** `schema_version = 1` and the keys and backend names in
+  [remote_session_connections.example.toml](remote_session_connections.example.toml),
+  where the file is looked for (`--config`, `$BFRSR_CONFIG`,
+  `~/.bigfix/.remote_session_connections.toml`) and `BFRSR_LOCAL_ROOT_SERVER`.
+  The lenient aliases (`url`, `host`, `user`, `type`, `wr`, …) keep working,
+  but may be deprecated, with a warning for at least one minor release first.
+
+**Provisional:** `Backend`, `RestBackend`, `ExplorerBackend`,
+`WebReportsBackend`, `SaasBackend`, `TrustStore`, `KnownCerts` and
+`CertInfo` are public and usable, but may change in a minor release (noted
+in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag
-or config key) come in minor releases, so code that switches on error kinds
-or codes should allow ones it doesn't know.
+or config key) come in minor releases. Code that switches on error kinds
+or codes should allow ones it doesn't know. `ResultError` itself accepts
+only the kinds of the installed version, so check `kind` before rebuilding
+one from a newer version's `--json`. Older versions warn about, and ignore,
+config keys they don't know.
 
 Not covered: the plain-text CLI layout and summary, stderr and log messages,
-error message wording, `detail` and `raw` (the server's own text), and
-anything not in `__all__`.
+error message wording, `detail` and `raw` (the server's own text), the
+certificate pin and cache files under `~/.bigfix`, and anything not in
+`__all__` (types such as `Pin` or `ServerAddress` that provisional classes
+return or take are provisional with them).
 
 ## Development
 

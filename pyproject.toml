@@ -62,6 +62,7 @@ bigfix-remote-session-relevance = "bigfix_remote_session_relevance.cli:main"
 Homepage = "https://github.com/jgstew/bigfix-remote-session-relevance"
 Issues   = "https://github.com/jgstew/bigfix-remote-session-relevance/issues"
 Source   = "https://github.com/jgstew/bigfix-remote-session-relevance"
+Changelog = "https://github.com/jgstew/bigfix-remote-session-relevance/releases"
 
 # --- Build backend ---------------------------------------------------------
 

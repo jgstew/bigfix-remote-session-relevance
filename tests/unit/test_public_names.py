@@ -97,3 +97,66 @@ def test_guard_sees_the_known_entry_points() -> None:
 def test_backend_not_implemented_error_is_not_exported() -> None:
     assert "BackendNotImplementedError" not in pkg.__all__
     assert not hasattr(pkg, "BackendNotImplementedError")
+
+
+# The public names 1.0 freezes (README § Compatibility). Removing one is a
+# major version; adding one means adding it here, on purpose.
+PUBLIC_NAMES = [
+    "AsyncSessionRelevanceClient",
+    "AuthenticationError",
+    "Backend",
+    "BackendConnectionError",
+    "BackendTimeoutError",
+    "CertInfo",
+    "Config",
+    "ConfigError",
+    "ConnectionConfig",
+    "ERROR_KINDS",
+    "ExplorerBackend",
+    "ExplorerExtras",
+    "HTTPStatusError",
+    "KnownCerts",
+    "RawResponse",
+    "ResponseFormatError",
+    "RestBackend",
+    "ResultError",
+    "SaasBackend",
+    "SessionRelevanceClient",
+    "SessionRelevanceError",
+    "SessionRelevanceEvaluationError",
+    "SessionRelevanceResult",
+    "SessionRelevanceResults",
+    "TLSError",
+    "TrustStore",
+    "UnsupportedFeatureError",
+    "WebReportsBackend",
+    "async_evaluate_session_relevance",
+    "default_config_path",
+    "escape_answer",
+    "escape_result",
+    "evaluate_session_relevance",
+    "load_config",
+    "supports_explorer_extras",
+    "unescape_answer",
+]
+
+
+def test_all_is_the_designed_public_surface() -> None:
+    assert sorted(pkg.__all__) == PUBLIC_NAMES
+
+
+# Public, but may change in a minor release (README § Compatibility).
+PROVISIONAL = {
+    "Backend",
+    "ExplorerBackend",
+    "RestBackend",
+    "SaasBackend",
+    "WebReportsBackend",
+    "CertInfo",
+    "KnownCerts",
+    "TrustStore",
+}
+
+
+def test_provisional_names_are_public_names() -> None:
+    assert PROVISIONAL.issubset(PUBLIC_NAMES)

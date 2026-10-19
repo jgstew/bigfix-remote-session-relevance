@@ -269,7 +269,7 @@ server's text.
 - **`per_deployment`** (default): one group per deployment id (a connection
   without one is its own group). Groups run concurrently. Within a group,
   connections are tried in `backend_preference` order (explorer, rest,
-  webreports), then config order, and the first that works stays first.
+  webreports, saas), then config order, and the first that works stays first.
 - Failover happens on `connection`, `timeout`, `tls`, `authentication`,
   `http` and `response_format`. **Never** on
   `session_relevance`
@@ -414,11 +414,13 @@ read-only, so these are used without opting in, as besapi does.
 ## Compatibility
 
 From 1.0.0 the public surface follows semantic versioning; README §
-Compatibility lists what that covers. Tests pin the parts most easily
-changed by accident: `test_result_has_every_designed_field` (the result
-fields), `test_error_kinds_are_the_designed_set` (the error kinds and their
-order), and `test_public_names.py` (session relevance naming of every
-public `evaluate*` parameter). A new field, kind or error code is additive;
+Compatibility lists what that covers and which names are provisional (the
+backend and trust classes). Tests pin the parts most easily changed by
+accident: `test_result_has_every_designed_field` (the result fields),
+`test_error_kinds_are_the_designed_set` (the error kinds and their order),
+`test_public_names.py` (`__all__` as a snapshot, the provisional set, and
+session relevance naming of every public `evaluate*` parameter), and
+`test_exit_codes_are_the_documented_values`. A new field, kind or error code is additive;
 renaming or removing one is a major version. `test_packaging.py` keeps the
 Python classifiers equal to the versions CI tests.
 
