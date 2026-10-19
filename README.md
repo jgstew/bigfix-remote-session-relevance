@@ -100,6 +100,9 @@ the answer boundaries matter, or `--keep-escapes`. `--json` and `--raw` are
 never changed, terminal or not. A pipe into something that writes to the
 terminal (`| less -R`, `| tee /dev/tty`) is not escaped either.
 
+Text the output encoding can't hold, such as a lone surrogate (`\ud800` in
+a JSON answer), is written as `\ud800` instead of stopping the run.
+
 Results stream in as each deployment answers (completion order), so a slow
 or unreachable server no longer holds up the ones that already finished.
 Plain text and `--raw` stream; `--json` is one document, so it prints once

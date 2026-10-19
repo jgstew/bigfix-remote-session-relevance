@@ -9,12 +9,20 @@ default fan-out queries it once. Only the hash is ever stored.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable
 
 from .backends.base import Backend
 
 DEPLOYMENT_ID_SESSION_RELEVANCE = "sha256 of gather url of bes license"
 GATHER_URL_RELEVANCE = "gather url of bes license"
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_DEPLOYMENT_ID = re.compile(r"(?:multi:)?[0-9a-f]{64}")
+
+
+def is_deployment_id(value: object) -> bool:
+    """The shape `deployment_id_from_hashes` produces: a SHA-256 or a ``multi:`` one."""
+    return isinstance(value, str) and _DEPLOYMENT_ID.fullmatch(value) is not None
 
 
 def deployment_id_from_hashes(hashes: Iterable[str]) -> str | None:
@@ -22,10 +30,12 @@ def deployment_id_from_hashes(hashes: Iterable[str]) -> str | None:
 
     A Web Reports server aggregating several datasources reports several
     hashes; it gets a composite ``multi:`` id so it is never mistaken for a
-    duplicate of any single deployment.
+    duplicate of any single deployment. An answer that is not a SHA-256
+    (hex) means no id at all: the id is printed, written to the config and
+    used for grouping, and it comes from the server.
     """
     unique = sorted({h.strip().lower() for h in hashes if h and h.strip()})
-    if not unique:
+    if not unique or not all(_SHA256_HEX.fullmatch(h) for h in unique):
         return None
     if len(unique) == 1:
         return unique[0]

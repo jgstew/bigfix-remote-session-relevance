@@ -393,3 +393,18 @@ def test_sid_saved_and_shown(tmp_path: Path) -> None:
     (conn,) = load_config(path).connections
     assert conn.sid == "bf1"
     assert redacted_summary(load_config(path))[0]["sid"] == "bf1"
+
+
+@pytest.mark.parametrize(
+    ("cached", "expected"),
+    [
+        ("a" * 64, "a" * 64),
+        ("multi:" + "b" * 64, "multi:" + "b" * 64),
+        ("\x1b]0;pwned\x07", None),  # cached by a version that didn't check ids
+    ],
+)
+def test_cached_local_deployment_id_must_look_like_an_id(cached: str, expected: str | None) -> None:
+    from bigfix_remote_session_relevance import config as config_module
+
+    config_module.record_local_deployment_id("https://localhost:52311", cached)
+    assert config_module._cached_local_deployment_id("https://localhost:52311") == expected

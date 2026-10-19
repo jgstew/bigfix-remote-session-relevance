@@ -83,3 +83,21 @@ async def test_multi_datasource_web_reports(recording_transport: type) -> None:
         found = await discover_deployment_id(b)
     assert found is not None
     assert found.startswith("multi:")
+
+
+def test_deployment_id_from_hashes_rejects_anything_but_sha256_hex() -> None:
+    # The id is the server's answer: printed, cached in the config and used
+    # to group connections, so anything but a SHA-256 is not an id.
+    assert deployment_id_from_hashes([f" {HASH.upper()}\n"]) == HASH
+    assert deployment_id_from_hashes(["\x1b]0;pwned\x07" + "a" * 56]) is None
+    assert deployment_id_from_hashes(["a" * 63]) is None
+    assert deployment_id_from_hashes(["g" * 64]) is None
+    assert deployment_id_from_hashes([HASH, "not a hash"]) is None  # never a partial multi:
+
+
+async def test_discovery_of_a_bogus_answer_is_not_discovered(recording_transport: type) -> None:
+    rec = recording_transport(
+        [httpx.Response(200, json={"result": ["\x1b[2Jgotcha"], "plural": False, "type": "string"})]
+    )
+    async with RestBackend("h", username="u", password="p", transport=rec.transport) as b:
+        assert await discover_deployment_id(b) is None

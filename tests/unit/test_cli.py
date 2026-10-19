@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import threading
@@ -460,3 +461,92 @@ def test_tty_raw_mode_error_line_is_escaped(
     err = capsys.readouterr().err
     assert "\x1b" not in err
     assert "bad%1b[2J" in err
+
+
+def test_discover_deployments_rejects_a_bogus_id(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No configured id to fall back on, so a rejected answer shows.
+    config_path.write_text(CONFIG.replace(f'deployment_id = "{D1}"\n', ""))
+    routes = {
+        "dev-root": httpx.Response(
+            200, json={"result": ["\x1b]0;pwned\x07"], "plural": False, "type": "string"}
+        ),
+        "dev-wr": _wr(f"<String>{'a' * 64}</String>"),
+    }
+    assert _run(["--discover-deployments"], routes) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "dev-root: (not discovered)" in out
+    assert f"dev-wr: {'a' * 64}" in out
+    assert "pwned" not in config_path.read_text()
+
+
+def test_show_config_escapes_control_characters(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # e.g. an id cached by an older version, which didn't check it
+    config_path.write_text(CONFIG.replace(D1, "\\u001b]0;pwned\\u0007" + "1" * 50))
+    assert _run(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "%1b]0;pwned" in out
+
+
+def test_lone_surrogate_in_an_answer_does_not_crash_the_output(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Valid JSON (a \ud800 escape) but not encodable as UTF-8.
+    routes = {
+        "dev-root": httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            text='{"result": ["a\\ud800b"], "plural": false, "type": "string"}',
+        )
+    }
+    assert _run(["--connection", "dev-root", "q"], routes) == 0
+    assert capsys.readouterr().out == "a\\ud800b\n"
+    assert _run(["--connection", "dev-root", "--json", "q"], routes) == 0
+    assert json.loads(capsys.readouterr().out)[0]["answers"] == ["a\ud800b"]
+
+
+def test_discover_deployments_escapes_an_id_cached_before_ids_were_checked(
+    config_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path.write_text(CONFIG.replace(D1, "\\u001b]0;pwned\\u0007"))
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    routes = {
+        "dev-root": httpx.ConnectError("refused"),
+        "dev-wr": _wr(f"<String>{'a' * 64}</String>"),
+    }
+    _run(["--discover-deployments"], routes)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "dev-root: %1b]0;pwned%07" in out
+
+
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
+def test_tolerate_unencodable_covers_every_handler_that_can_fail(errors: str) -> None:
+    # surrogateescape is CPython's stdout default in UTF-8 mode and the C
+    # locale, and it refuses \ud800 just as strict does.
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors=errors)
+    cli._tolerate_unencodable(stream)
+    stream.write("a\ud800b")
+    stream.flush()
+    assert stream.buffer.getvalue() == b"a\\ud800b"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("errors", ["replace", "xmlcharrefreplace"])
+def test_tolerate_unencodable_keeps_a_handler_that_cannot_fail(errors: str) -> None:
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors=errors)
+    cli._tolerate_unencodable(stream)
+    assert stream.errors == errors
+
+
+def test_tolerate_unencodable_ignores_closed_or_detached_streams() -> None:
+    closed = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    closed.close()
+    cli._tolerate_unencodable(closed)
+    detached = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    detached.detach()
+    cli._tolerate_unencodable(detached)

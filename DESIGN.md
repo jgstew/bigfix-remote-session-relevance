@@ -262,8 +262,11 @@ server's text.
   hashed locally (UTF-8, lowercase hex): **(observed)** the two agree on REST
   and Web Reports. A Web Reports server returning several ids (several
   datasources) gets `multi:` + sha256 of the sorted ids, so it is never treated
-  as a duplicate of one deployment. Discovered ids are written back to the
-  config (tomlkit keeps comments) and trusted on later runs.
+  as a duplicate of one deployment. Any answer that is not 64 hex digits
+  (after trimming and lowercasing) means no id: it is server text that would
+  be printed, written to the config and used for grouping. Discovered ids
+  are written back to the config (tomlkit keeps comments) and trusted on
+  later runs.
 - **`per_deployment`** (default): one group per deployment id (a connection
   without one is its own group). Groups run concurrently. Within a group,
   connections are tried in `backend_preference` order (explorer, rest,
@@ -303,6 +306,19 @@ server's text.
   unambiguous form. Output to a pipe or file is unchanged, for scripts.
   This is display only: `answers`, `answer_strings`, `--json` and `--raw`
   are never changed, and neither is any backend's `evaluate()`.
+  Other server text is escaped too, terminal or not, since it is only ever
+  read by a person: setup-wizard probe messages, and the deployment ids that
+  `--show-config` and `--discover-deployments` print (one configured or
+  cached before ids were checked can hold server text). A cached local root
+  server id that isn't id-shaped is ignored, and BigFix SaaS server ids
+  (`sid`) that aren't plain names (`[0-9A-Za-z_-]+`) are skipped. The CLI
+  switches stdout/stderr to `errors="backslashreplace"` unless their handler
+  can't fail (`replace`, `ignore`, `xmlcharrefreplace`, `namereplace`), so an
+  answer the encoding can't hold (a lone surrogate from a JSON `\ud800`, or
+  text a non-UTF-8 console can't show) prints as `\uXXXX` instead of ending
+  the run. `strict` and `surrogateescape` (CPython's default in UTF-8 mode
+  and the C locale, which refuses `\ud800` too) are both replaced, even when
+  set through `PYTHONIOENCODING`.
 
 ## TLS: trust on first use
 

@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -49,6 +50,8 @@ from ..result import ResultError, SessionRelevanceResult
 from ..server_address import saas_api_address
 from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
 from .base import Backend, error_from_status
+
+_SID_KEY = re.compile(r"[0-9A-Za-z_-]+")
 
 if TYPE_CHECKING:
     from ..config import ConnectionConfig
@@ -290,7 +293,8 @@ class SaasBackend(Backend):
         session.until = time.monotonic() + max(lifetime, 0.0)
         pids = data.get("pids")
         if isinstance(pids, dict) and isinstance(pids.get("bf"), dict):
-            session.servers = tuple(f"bf{key}" for key in pids["bf"])
+            # A sid is shown by --setup and becomes part of a connection name.
+            session.servers = tuple(f"bf{key}" for key in pids["bf"] if _SID_KEY.fullmatch(key))
         session.cookies = httpx.Cookies(client.cookies)  # a copy: each client has its own jar
         session.generation += 1
         self._synced = (client, session.generation)

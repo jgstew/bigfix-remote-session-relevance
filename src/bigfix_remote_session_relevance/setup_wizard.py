@@ -33,6 +33,7 @@ from .deployment import (
     deployment_id_from_hashes,
     discover_deployment_id,
 )
+from .escapes import escape_controls
 from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
 from .server_address import normalize_server, saas_api_address
@@ -207,7 +208,8 @@ def run_setup(
     say("")
     for r in results:
         dep = f" deployment {r.deployment_id[:12]}…" if r.deployment_id else ""
-        note = f" ({r.message})" if r.message and r.status != "ok" else ""
+        # The message can be the server's text; the wizard always talks to a person.
+        note = f" ({escape_controls(r.message)})" if r.message and r.status != "ok" else ""
         say(f"  {r.backend:<10} {_where(r):<32} {r.status}{dep}{note}")
     ids = {r.deployment_id for r in results if r.deployment_id}
     if len(ids) == 1 and len(results) > 1:
