@@ -7,7 +7,8 @@ it, which depends on whether a BigFix Explorer is reachable from it
 * With Explorer, the root server forwards the query to it. A JSON body sent
   as ``application/json+relevance`` is evaluated exactly. Form posts are
   decoded only once there, so besapi's double-quoting breaks every query
-  ("This expression contained a character which is not allowed."), and a
+  ("This expression contained a character which is not allowed.", or 400
+  "Invalid JSON" when the quoted value is still valid JSON), and a
   plain form value that is itself valid JSON (``123``, ``true``,
   ``"hello"``) is rejected as "Invalid JSON".
 * Without Explorer, ``application/json+relevance`` answers 503 "no reachable
@@ -78,7 +79,14 @@ class RestBackend(Backend):
             data={"relevance": encode_session_relevance(session_relevance), "output": "json"},
         )
         result = parse_session_relevance_response(session_relevance, response, self.name)
-        if result.error is not None and _RETRY_JSON_RE.search(result.error.message):
+        error = result.error
+        # Only the server's own answer counts: our "invalid JSON: ..." for a
+        # garbled body (response_format) says nothing about Explorer.
+        if (
+            error is not None
+            and error.kind == "session_relevance"
+            and _RETRY_JSON_RE.search(error.message)
+        ):
             # If Explorer came back during the fallback, the double-quoted form
             # now fails every query: "not allowed", or 400 "Invalid JSON" when
             # the form value is itself valid JSON. One JSON retry tells the two

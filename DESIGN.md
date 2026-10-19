@@ -28,7 +28,7 @@ query there:
 | Request | Explorer reachable | No Explorer |
 |---|---|---|
 | `application/json+relevance` body `{"relevance": …}` | evaluated exactly | 503 "no reachable BigFix Explorer…" |
-| form, percent-quoted first (besapi) | every query fails: "character which is not allowed" | works: the value is URL-decoded twice |
+| form, percent-quoted first (besapi) | every query fails: "character which is not allowed", or 400 "Invalid JSON" when the quoted value is still valid JSON (`1`, `true`, `1.5`) | works: the value is URL-decoded twice |
 | form, plain (and GET) | works, except a relevance that is itself valid JSON (`123`, `true`, `"x"`): 400 "Invalid JSON" | `+` survives, but `%xx` is decoded twice: `"100%25 done"` gives "improper %-sequence", and `%22` inside a string ends it early |
 | `application/json` | 400 "Bad request parameters" | not tested |
 
@@ -37,13 +37,14 @@ escapes (and `%22` inside string literals is common), so plain relevance is
 sent as `application/json+relevance` first. On that
 specific 503 it falls back to besapi's percent-quoted form and keeps using
 the form for `EXPLORER_RECHECK_SECONDS` (300 s) before trying JSON again.
-If Explorer returns during that window the form fails every query with
-"character which is not allowed"; that error triggers one JSON retry, and a
-503 on the retry means the error was genuine (e.g. `1.5`). **(observed)**
+If Explorer returns during that window the form fails every query, mostly
+with "character which is not allowed"; that error triggers one JSON retry,
+and a 503 on the retry means the error was genuine (e.g. `1.5`). **(observed)**
 Relevance whose percent-quoted form is still valid JSON (`1`, `true`,
 `1.5`) fails differently then, with 400 `{"error":"Invalid JSON: Invalid
 required value type, expected type: \"object\""}`, which triggers the same
-retry (issue #6). String literals such as `"hello"` are quoted to `%22…` and
+retry (issue #6). Only errors the server reports count; a garbled body
+(`response_format`) is not retried. String literals such as `"hello"` are quoted to `%22…` and
 get "not allowed" instead. **(observed)**
 With Explorer registered but down, every REST query takes ~3 s (JSON 503 and
 form alike): the root server waits for Explorer before answering itself.

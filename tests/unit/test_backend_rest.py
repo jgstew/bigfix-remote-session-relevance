@@ -281,8 +281,13 @@ async def test_genuine_disallowed_character_error_is_kept(recording_transport: t
     assert result.error is not None
     assert result.error.kind == "session_relevance"
     assert result.error.message == "This expression contained a character which is not allowed."
-    # Fallback still active afterwards: the last query went straight to the form.
-    assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
+    assert [r.headers["content-type"] for r in rec.requests] == [
+        "application/json+relevance",
+        "application/x-www-form-urlencoded",
+        "application/x-www-form-urlencoded",
+        "application/json+relevance",  # the retry: 503
+        "application/x-www-form-urlencoded",  # fallback still active
+    ]
 
 
 # What the root server answers once Explorer is back when the percent-quoted
@@ -339,4 +344,25 @@ async def test_invalid_json_error_kept_when_explorer_still_down(
     assert result.error is not None
     assert result.error.http_status == 400
     assert result.error.message == INVALID_JSON_MESSAGE
-    assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
+    assert [r.headers["content-type"] for r in rec.requests] == [
+        "application/json+relevance",
+        "application/x-www-form-urlencoded",
+        "application/x-www-form-urlencoded",
+        "application/json+relevance",  # the retry: 503
+        "application/x-www-form-urlencoded",  # fallback still active
+    ]
+
+
+async def test_unparseable_form_response_is_not_retried(recording_transport: type) -> None:
+    # Our own "invalid JSON: ..." response_format error (a garbled body) is
+    # not the server's 400 "Invalid JSON" and says nothing about Explorer.
+    ok = httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
+    garbled = httpx.Response(200, text='{"trunc', headers={"content-type": "application/json"})
+    rec = recording_transport([NO_EXPLORER, ok, garbled])
+    async with _backend(rec) as backend:
+        await backend.evaluate("1")
+        result = await backend.evaluate("1")
+    assert result.error is not None
+    assert result.error.kind == "response_format"
+    assert "invalid JSON" in result.error.message
+    assert len(rec.requests) == 3
