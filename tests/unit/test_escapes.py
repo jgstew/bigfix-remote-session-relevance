@@ -81,3 +81,16 @@ def test_escape_result_leaves_errors_alone() -> None:
         "q", ResultError(kind="session_relevance", message="User-defined error: a%b c")
     )
     assert escape_result(failed) is failed
+
+
+def test_escape_result_without_anything_to_escape_is_the_same_result() -> None:
+    result = SessionRelevanceResult.from_values("q", [["café", 1]], type="( string, integer )")
+    assert escape_result(result) is result
+
+
+@pytest.mark.parametrize("text", ["a\u00a0b", "a\u2028b", "a\x85b", "a\x80b", "€"])
+def test_non_ascii_unprintable_is_never_escaped(text: str) -> None:
+    # Only ASCII controls are escaped; a printable-text shortcut must not
+    # widen that to every non-printable character.
+    assert escape_answer(text) == text
+    assert unescape_answer(text) == text

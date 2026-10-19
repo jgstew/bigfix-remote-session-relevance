@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from .result import SessionRelevanceResult
 
 _ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
-_ESCAPED = frozenset(["%", *map(chr, range(0x20)), "\x7f"])
+_ESCAPES = {c: f"%{c:02x}" for c in (ord("%"), *range(0x20), 0x7F)}  # for str.translate
 
 
 def unescape_answer(text: str) -> str:
@@ -27,6 +27,8 @@ def unescape_answer(text: str) -> str:
     two hex digits is left as is. Every escaped character is ASCII, so
     ``chr()`` of the byte is the character.
     """
+    if "%" not in text:  # most answers: skip the regex
+        return text
     return _ESCAPE_RE.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
@@ -37,7 +39,12 @@ def escape_answer(text: str) -> str:
     Reports sends them, so ``escape_answer(unescape_answer(t)) == t`` for its
     text. Makes non-printable characters visible.
     """
-    return "".join(f"%{ord(c):02x}" if c in _ESCAPED else c for c in text)
+    # ASCII controls are never printable, so printable text without "%" has
+    # nothing to escape; both checks run in C. (Some non-ASCII characters are
+    # not printable either: they take the translate path and come out as is.)
+    if "%" not in text and text.isprintable():
+        return text
+    return text.translate(_ESCAPES)
 
 
 def escape_result(result: SessionRelevanceResult) -> SessionRelevanceResult:
@@ -49,6 +56,8 @@ def escape_result(result: SessionRelevanceResult) -> SessionRelevanceResult:
     if result.error is not None:
         return result
     answers = tuple(_escape_value(a) for a in result.answers)
+    if answers == result.answers:
+        return result
     return result.replace(answers=answers, answer_strings=tuple(answer_string(a) for a in answers))
 
 
