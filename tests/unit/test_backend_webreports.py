@@ -262,3 +262,64 @@ async def test_any_fault_on_the_token_path_logs_in_again(recording_transport: ty
         result = await backend.evaluate("2")
     assert result.answers == ("b",)
     assert len(rec.requests) == 3
+
+
+# Web Reports keeps qna-style escapes in answer text: "%" and 0x00-0x1F/0x7F
+# as %xx with lowercase hex (issue #5, observed live on 11.0.7). REST and
+# Explorer send the text itself, so these must be decoded to match.
+ESCAPED_LEAVES = (
+    "<String>a%25b</String><String>a%2541</String><String>x%0ay</String>"
+    "<String>A%7FB</String><String>100%</String>"
+)
+DECODED = ("a%b", "a%41", "x\ny", "A\x7fB", "100%")
+
+
+async def test_structured_answers_are_unescaped(recording_transport: type) -> None:
+    rec = recording_transport([_xml(_structured(ESCAPED_LEAVES))])
+    async with _backend(rec) as backend:
+        result = await backend.evaluate("q")
+    assert result.answers == DECODED
+    assert result.answer_strings == DECODED
+    # raw is the response as sent.
+    assert result.raw is not None
+    assert "a%25b" in result.raw.text
+
+
+async def test_structured_tuple_members_are_unescaped(recording_transport: type) -> None:
+    results = (
+        "<Tuple><String>a%25b</String><Integer>1</Integer>"
+        "<DateTime>2026-10-17T17:09:32-04:00</DateTime></Tuple>"
+    )
+    rec = recording_transport(
+        [_xml(_structured(results, plural="false", type_="( string, integer, time )"))]
+    )
+    async with _backend(rec) as backend:
+        result = await backend.evaluate("q")
+    assert result.answers == (("a%b", 1, "Sat, 17 Oct 2026 17:09:32 -0400"),)
+    assert result.answer_strings == ("a%b, 1, Sat, 17 Oct 2026 17:09:32 -0400",)
+
+
+async def test_plain_answers_are_unescaped(recording_transport: type) -> None:
+    body = _soap(
+        '<GetRelevanceResultResponse xmlns="http://schemas.bigfix.com/Relevance">'
+        "<a>a%25b</a><a>x%0ay</a><a>a%01b</a></GetRelevanceResultResponse>",
+        token=None,
+    )
+    rec = recording_transport([_xml(body)])
+    async with WebReportsBackend(
+        "wr", username="u", password="p", transport=rec.transport, soap_method="plain"
+    ) as backend:
+        result = await backend.evaluate("q")
+    assert result.answers == ("a%b", "x\ny", "a\x01b")
+    assert result.raw is not None
+    assert "a%25b" in result.raw.text
+
+
+async def test_error_text_is_not_unescaped(recording_transport: type) -> None:
+    # Web Reports already decodes error text: `error "a%25b%09c"` faults
+    # with "User-defined error: a%b c". A "%25" here is literal.
+    rec = recording_transport([_xml(_fault("User-defined error: a%25b"), status=500)])
+    async with _backend(rec) as backend:
+        result = await backend.evaluate("q")
+    assert result.error is not None
+    assert result.error.message == "User-defined error: a%25b"

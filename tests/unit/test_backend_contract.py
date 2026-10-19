@@ -83,6 +83,30 @@ CASES: dict[str, tuple[Any, Any]] = {
             "( integer, string )",
         ),
     ),
+    # Web Reports sends qna-style escapes (lowercase hex); REST/Explorer send
+    # the text itself. Values observed live on 11.0.7 (issue #5).
+    "escaped_strings": (
+        _json(["a%b", "a%41", "x\ny", "a\tb", "A\x7fB"], True, "string"),
+        _wr_structured(
+            "<String>a%25b</String><String>a%2541</String><String>x%0ay</String>"
+            "<String>a%09b</String><String>A%7fB</String>",
+            True,
+            "string",
+        ),
+    ),
+    "escaped_tuple": (
+        _json([["a%b", 1]], False, "( string, integer )"),
+        _wr_structured(
+            "<Tuple><String>a%25b</String><Integer>1</Integer></Tuple>",
+            False,
+            "( string, integer )",
+        ),
+    ),
+    # Error text is not escaped by Web Reports: it must come through as is.
+    "error_with_percent": (
+        httpx.Response(200, json={"error": "Error: User-defined error: a%b c"}),
+        _wr_fault("User-defined error: a%b c"),
+    ),
     "relevance_error": (
         httpx.Response(200, json={"error": 'Error: The operator "foo" is not defined.'}),
         _wr_fault('The operator "foo" is not defined.'),

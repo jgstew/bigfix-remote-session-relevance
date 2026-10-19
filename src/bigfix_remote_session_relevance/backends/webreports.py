@@ -25,6 +25,7 @@ import defusedxml.ElementTree as SafeET
 import httpx
 from defusedxml import DefusedXmlException
 
+from ..escapes import unescape_answer
 from ..result import RawResponse, ResultError, SessionRelevanceResult
 from ._parsing import parse_time_ms, raw_from_response
 from .base import Backend, error_from_status, normalize_relevance_error
@@ -217,7 +218,7 @@ class WebReportsBackend(Backend):
         node = _find(body, "GetRelevanceResultResponse")
         if node is None:
             return self._format_error(session_relevance, raw, "no GetRelevanceResultResponse")
-        values = [child.text or "" for child in node if _local(child.tag) == "a"]
+        values = [unescape_answer(child.text or "") for child in node if _local(child.tag) == "a"]
         # Documented rule: one <a> is a singular result; zero or several is plural.
         return SessionRelevanceResult.from_values(
             session_relevance, values, type=None, plural=len(values) != 1, raw=raw
@@ -281,7 +282,8 @@ def _render(el: Element) -> Any:
     children = list(el)
     if children:
         return [_render(c) for c in children]
-    text = el.text or ""
+    # Answer text keeps qna-style %XX escapes; REST and Explorer send it decoded.
+    text = unescape_answer(el.text or "")
     if _local(el.tag) == "DateTime":
         return bigfix_time(text)
     return text
