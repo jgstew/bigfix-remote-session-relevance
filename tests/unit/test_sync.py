@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -162,3 +166,84 @@ def test_abandoned_sync_stream_cancels_running_queries() -> None:
 def test_sync_explorer_stream_validates_on_call() -> None:
     with SessionRelevanceClient(_config(), **KW) as client, pytest.raises(ValueError):
         client.evaluate_explorer_stream("q", keys="id {")
+
+
+_UNCLOSED_CLIENT_SCRIPT = """
+import httpx
+from bigfix_remote_session_relevance import SessionRelevanceClient
+from bigfix_remote_session_relevance.config import Config, ConnectionConfig
+
+def factory(conn):
+    return httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"result": [42], "plural": False})
+    )
+
+config = Config(connections=(ConnectionConfig(
+    name="a", backend="rest", server="a.example.com", username="u", password="p",
+    deployment_id="1" * 64, verify=True, connect_timeout=1, read_timeout=5,
+),))
+client = SessionRelevanceClient(config, transport_factory=factory, trust=None)
+assert client.evaluate("q").ok
+# No close(): long-lived owners (e.g. an MCP server) never get to call it.
+"""
+
+
+def test_unclosed_client_does_not_hang_interpreter_exit(tmp_path: Path) -> None:
+    script = tmp_path / "unclosed.py"
+    script.write_text(_UNCLOSED_CLIENT_SCRIPT)
+    proc = subprocess.run(  # noqa: S603 - our own interpreter and script
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def _new_threads(before: set[threading.Thread]) -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t not in before]
+
+
+def test_garbage_collected_client_stops_its_loop_thread() -> None:
+    before = set(threading.enumerate())
+    client = SessionRelevanceClient(_config(), **KW)
+    assert client.evaluate("q").ok
+    loop_threads = _new_threads(before)
+    assert len(loop_threads) == 1
+    del client
+    gc.collect()
+    assert not loop_threads[0].is_alive()
+
+
+def test_client_dropped_on_its_own_loop_thread_still_shuts_down() -> None:
+    # The finalizer can't wait on the thread it runs on; the shutdown must
+    # still happen rather than leak the loop.
+    before = set(threading.enumerate())
+    client = SessionRelevanceClient(_config(), **KW)
+    (loop_thread,) = _new_threads(before)
+    portal = client._portal
+    assert portal is not None
+    finalizer = client._finalizer
+    portal.call(finalizer)
+    loop_thread.join(5)
+    assert not loop_thread.is_alive()
+
+
+def test_close_cancels_an_in_flight_stream() -> None:
+    def factory(conn: ConnectionConfig) -> httpx.AsyncBaseTransport:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if conn.name == "a":
+                await anyio.sleep(30)
+            return httpx.Response(200, json={"result": [1], "plural": False})
+
+        return httpx.MockTransport(handler)
+
+    client = SessionRelevanceClient(_two_deployments(), transport_factory=factory, trust=None)
+    stream = client.evaluate_stream("q")
+    assert next(stream).connection == "b"
+    started = time.monotonic()
+    client.close()
+    assert time.monotonic() - started < 5
+
+
+def test_stream_keeps_an_otherwise_unreferenced_client_alive() -> None:
+    stream = SessionRelevanceClient(_config(), **KW).evaluate_stream("q")
+    gc.collect()
+    assert [r.answers for r in stream] == [(42,)]

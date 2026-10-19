@@ -5,6 +5,13 @@ anyio blocking portal), so the sync API also works when the caller is
 already inside a running loop, such as a notebook or an async web app,
 where ``asyncio.run`` would fail.
 
+The client owns that thread rather than using ``start_blocking_portal``:
+a client that was never closed (a long-lived server just exits) left
+that context manager to be finalized during interpreter teardown, after
+daemon threads have stopped, and its ``portal.call(portal.stop)`` waited
+forever. A ``weakref.finalize`` runs as an atexit hook, while the loop
+thread still runs, so it closes such a client cleanly instead.
+
 The ``*_stream`` methods hand each result to the calling thread through a
 queue the moment the loop thread receives it.
 """
@@ -13,11 +20,14 @@ from __future__ import annotations
 
 import functools
 import queue
+import threading
+import weakref
 from collections.abc import AsyncGenerator, Callable, Iterable, Iterator, Mapping
-from contextlib import AbstractContextManager, aclosing
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any, Self, TypeVar
 
-from anyio.from_thread import BlockingPortal, start_blocking_portal
+import anyio
+from anyio.from_thread import BlockingPortal
 
 from .backends.explorer_extras import explorer_body
 from .client import AsyncSessionRelevanceClient
@@ -34,16 +44,21 @@ class SessionRelevanceClient:
     """Same API as `AsyncSessionRelevanceClient`, as plain methods."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        self._portal_cm: AbstractContextManager[BlockingPortal] | None = start_blocking_portal()
-        self._portal: BlockingPortal | None = self._portal_cm.__enter__()
+        portal, thread = _start_portal_thread()
+        self._portal: BlockingPortal | None = portal
         try:
             # Built on the portal's loop, where its locks and semaphores live.
-            self._client: AsyncSessionRelevanceClient = self._portal.call(
+            client: AsyncSessionRelevanceClient = portal.call(
                 functools.partial(_make_client, *args, **kwargs)
             )
         except BaseException:
-            self.close()
+            _shut_down(portal, thread, None)
+            self._portal = None
             raise
+        self._client: AsyncSessionRelevanceClient = client
+        # Holds no reference to self, so it also fires when the client is
+        # garbage collected; calling it again is a no-op.
+        self._finalizer = weakref.finalize(self, _shut_down, portal, thread, client)
 
     def _call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         if self._portal is None:
@@ -99,10 +114,12 @@ class SessionRelevanceClient:
             raise RuntimeError("SessionRelevanceClient is closed")
         return self._drain(self._portal, functools.partial(stream, *args, **kwargs))
 
-    @staticmethod
-    def _drain(portal: BlockingPortal, stream: Callable[[], AsyncGenerator[T]]) -> Iterator[T]:
+    def _drain(
+        self, portal: BlockingPortal, stream: Callable[[], AsyncGenerator[T]]
+    ) -> Iterator[T]:
         # A generator, so nothing starts until the first next(): an iterator
-        # that is created and dropped never queries anything.
+        # that is created and dropped never queries anything. Its frame holds
+        # self, so an unreferenced client isn't finalized mid-stream.
         items: queue.Queue[tuple[str, Any]] = queue.Queue()
 
         async def pump() -> None:
@@ -137,12 +154,9 @@ class SessionRelevanceClient:
         return self._client.connections
 
     def close(self) -> None:
-        portal, self._portal = self._portal, None
-        portal_cm, self._portal_cm = self._portal_cm, None
-        if portal is not None and hasattr(self, "_client"):
-            portal.call(self._client.aclose)
-        if portal_cm is not None:
-            portal_cm.__exit__(None, None, None)
+        self._portal = None
+        if hasattr(self, "_finalizer"):
+            self._finalizer()
 
     def __enter__(self) -> Self:
         return self
@@ -154,6 +168,46 @@ class SessionRelevanceClient:
         tb: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def _start_portal_thread() -> tuple[BlockingPortal, threading.Thread]:
+    ready: queue.Queue[BlockingPortal | BaseException] = queue.Queue()
+
+    async def host() -> None:
+        async with BlockingPortal() as portal:
+            ready.put(portal)
+            await portal.sleep_until_stopped()
+
+    def run() -> None:
+        try:
+            anyio.run(host)
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller's thread
+            ready.put(exc)
+
+    thread = threading.Thread(target=run, name="SessionRelevanceClient", daemon=True)
+    thread.start()
+    started = ready.get()
+    if isinstance(started, BaseException):
+        raise started
+    return started, thread
+
+
+def _shut_down(
+    portal: BlockingPortal, thread: threading.Thread, client: AsyncSessionRelevanceClient | None
+) -> None:
+    if threading.current_thread() is thread:
+        # Garbage collected on its own loop thread, which can't wait on
+        # itself: shut down from a helper thread instead.
+        threading.Thread(target=_shut_down, args=(portal, thread, client), daemon=True).start()
+        return
+    try:
+        if client is not None:
+            portal.call(client.aclose)
+    finally:
+        # Cancel what's still running (an abandoned stream's queries) rather
+        # than wait up to a read timeout for it.
+        portal.call(portal.stop, True)
+        thread.join()
 
 
 async def _make_client(*args: Any, **kwargs: Any) -> AsyncSessionRelevanceClient:
