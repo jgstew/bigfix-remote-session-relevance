@@ -460,3 +460,50 @@ def test_tty_raw_mode_error_line_is_escaped(
     err = capsys.readouterr().err
     assert "\x1b" not in err
     assert "bad%1b[2J" in err
+
+
+def test_discover_deployments_rejects_a_bogus_id(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No configured id to fall back on, so a rejected answer shows.
+    config_path.write_text(CONFIG.replace(f'deployment_id = "{D1}"\n', ""))
+    routes = {
+        "dev-root": httpx.Response(
+            200, json={"result": ["\x1b]0;pwned\x07"], "plural": False, "type": "string"}
+        ),
+        "dev-wr": _wr(f"<String>{'a' * 64}</String>"),
+    }
+    assert _run(["--discover-deployments"], routes) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "dev-root: (not discovered)" in out
+    assert f"dev-wr: {'a' * 64}" in out
+    assert "pwned" not in config_path.read_text()
+
+
+def test_show_config_escapes_control_characters(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # e.g. an id cached by an older version, which didn't check it
+    config_path.write_text(CONFIG.replace(D1, "\\u001b]0;pwned\\u0007" + "1" * 50))
+    assert _run(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "%1b]0;pwned" in out
+
+
+def test_lone_surrogate_in_an_answer_does_not_crash_the_output(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Valid JSON (a \ud800 escape) but not encodable as UTF-8.
+    routes = {
+        "dev-root": httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            text='{"result": ["a\\ud800b"], "plural": false, "type": "string"}',
+        )
+    }
+    assert _run(["--connection", "dev-root", "q"], routes) == 0
+    assert capsys.readouterr().out == "a\\ud800b\n"
+    assert _run(["--connection", "dev-root", "--json", "q"], routes) == 0
+    assert json.loads(capsys.readouterr().out)[0]["answers"] == ["a\ud800b"]

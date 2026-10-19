@@ -438,3 +438,19 @@ def test_setup_saas_totp_prompt_uses_input(tmp_path: Path) -> None:
         == 0
     )
     assert seen == ["654321"]
+
+
+def test_setup_shows_server_text_without_control_characters(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The wizard talks to a person: probe messages come from the server.
+    results = [ProbeResult("rest", "h", "error", None, "bad\x1b]0;pwned\x07\nfake line")]
+    run_setup(
+        tmp_path / "c.toml",
+        input_fn=_answers("h", "op"),
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(results),
+    )
+    err = capsys.readouterr().err
+    assert "\x1b" not in err
+    assert "(bad%1b]0;pwned%07%0afake line)" in err

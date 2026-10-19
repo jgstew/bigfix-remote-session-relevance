@@ -262,8 +262,11 @@ server's text.
   hashed locally (UTF-8, lowercase hex): **(observed)** the two agree on REST
   and Web Reports. A Web Reports server returning several ids (several
   datasources) gets `multi:` + sha256 of the sorted ids, so it is never treated
-  as a duplicate of one deployment. Discovered ids are written back to the
-  config (tomlkit keeps comments) and trusted on later runs.
+  as a duplicate of one deployment. Any answer that is not 64 hex digits
+  (after trimming and lowercasing) means no id: it is server text that would
+  be printed, written to the config and used for grouping. Discovered ids
+  are written back to the config (tomlkit keeps comments) and trusted on
+  later runs.
 - **`per_deployment`** (default): one group per deployment id (a connection
   without one is its own group). Groups run concurrently. Within a group,
   connections are tried in `backend_preference` order (explorer, rest,
@@ -303,6 +306,13 @@ server's text.
   unambiguous form. Output to a pipe or file is unchanged, for scripts.
   This is display only: `answers`, `answer_strings`, `--json` and `--raw`
   are never changed, and neither is any backend's `evaluate()`.
+  Other server text is escaped too, terminal or not, since it is only ever
+  read by a person: setup-wizard probe messages, and `--show-config` cells
+  (a deployment id cached before ids were checked). The CLI switches
+  stdout/stderr from `errors="strict"` to `"backslashreplace"`, so an answer
+  the encoding can't hold (a lone surrogate from a JSON `\ud800`, or text a
+  non-UTF-8 console can't show) prints as `\uXXXX` instead of ending the run.
+  An error handler set through `PYTHONIOENCODING` is kept.
 
 ## TLS: trust on first use
 
