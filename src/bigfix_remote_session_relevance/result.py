@@ -34,7 +34,6 @@ ERROR_KINDS: tuple[str, ...] = (
     "http",
     "response_format",
     "unsupported_feature",
-    "not_implemented",
 )
 
 RawFormat = Literal["json", "xml", "text"]

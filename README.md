@@ -181,6 +181,27 @@ could mean client relevance): `result.session_relevance`, the `to_dict()` /
 > `RelevanceError` → `SessionRelevanceEvaluationError`. Helpers follow suit
 > (`encode_session_relevance`, `parse_session_relevance_response`, …).
 
+## Compatibility
+
+From 1.0.0, releases follow [semantic versioning](https://semver.org/).
+Removing or changing any of these needs a new major version:
+
+- **Library:** the names in `bigfix_remote_session_relevance.__all__` and
+  their documented parameters, keyword names included.
+- **Results:** the `SessionRelevanceResult` and `ResultError` fields, the
+  `to_dict()` keys and value types, the error kinds (`ERROR_KINDS`) and the
+  exception class `raise_for_error()` raises for each.
+- **CLI:** flags, exit codes, and the `--json` output (`to_dict()` per result).
+- **Config file:** the keys it accepts and what they mean.
+
+Additions (a new result field or `to_dict()` key, error kind or code, flag
+or config key) come in minor releases, so code that switches on error kinds
+or codes should allow ones it doesn't know.
+
+Not covered: the plain-text CLI layout and summary, stderr and log messages,
+error message wording, `detail` and `raw` (the server's own text), and
+anything not in `__all__`.
+
 ## Development
 
 ```bash

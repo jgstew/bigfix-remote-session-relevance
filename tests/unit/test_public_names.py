@@ -92,3 +92,8 @@ def test_no_public_parameter_is_bare_relevance() -> None:
 def test_guard_sees_the_known_entry_points() -> None:
     names = {f.__qualname__ for f in _public_callables()}
     assert {"SessionRelevanceClient.evaluate_many", "Backend.evaluate", "explorer_body"} <= names
+
+
+def test_backend_not_implemented_error_is_not_exported() -> None:
+    assert "BackendNotImplementedError" not in pkg.__all__
+    assert not hasattr(pkg, "BackendNotImplementedError")

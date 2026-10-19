@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-remote-session-relevance"
-version = "0.6.2"
+version = "0.7.0"
 description = "Evaluate BigFix session relevance through the REST API, Web Reports SOAP API, or BigFix Explorer, with one common result type."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -14,7 +14,7 @@ authors = [
 requires-python = ">=3.11"
 keywords = ["bigfix", "session-relevance", "rest-api", "web-reports", "bigfix-explorer"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Framework :: AsyncIO",
   "Intended Audience :: System Administrators",
   "License :: OSI Approved :: MIT License",
@@ -25,6 +25,8 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Topic :: System :: Systems Administration",
   "Typing :: Typed",
 ]

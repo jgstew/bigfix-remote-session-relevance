@@ -249,7 +249,6 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `http` | other statuses | `service_unavailable` |
 | `response_format` | not the expected JSON/XML (e.g. a login page) | |
 | `unsupported_feature` | Explorer extras on a deployment without Explorer access | |
-| `not_implemented` | reserved for a backend type that exists in the schema but is not built | |
 
 Session relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the
@@ -272,7 +271,7 @@ server's text.
   connections are tried in `backend_preference` order (explorer, rest,
   webreports), then config order, and the first that works stays first.
 - Failover happens on `connection`, `timeout`, `tls`, `authentication`,
-  `http`, `response_format` and `not_implemented`. **Never** on
+  `http` and `response_format`. **Never** on
   `session_relevance`
   (the query would fail everywhere) and **never** on `pin_mismatch` /
   `pinned_cert_invalid` (a possible impostor is a security signal, not an
@@ -411,6 +410,17 @@ read-only, so these are used without opting in, as besapi does.
   deployment id is kept, with its server, in
   `~/.bigfix/.remote_session_local_root_server.toml` (0600) and reused only
   for that server.
+
+## Compatibility
+
+From 1.0.0 the public surface follows semantic versioning; README §
+Compatibility lists what that covers. Tests pin the parts most easily
+changed by accident: `test_result_has_every_designed_field` (the result
+fields), `test_error_kinds_are_the_designed_set` (the error kinds and their
+order), and `test_public_names.py` (session relevance naming of every
+public `evaluate*` parameter). A new field, kind or error code is additive;
+renaming or removing one is a major version. `test_packaging.py` keeps the
+Python classifiers equal to the versions CI tests.
 
 ## Open questions
 
