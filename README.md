@@ -97,7 +97,8 @@ on a terminal keep their line breaks but lose the other control characters.
 Output to a **pipe or file** is the answer text as is, one answer per line,
 so an answer containing a newline prints as several lines. Use `--json` when
 the answer boundaries matter, or `--keep-escapes`. `--json` and `--raw` are
-never changed, terminal or not.
+never changed, terminal or not. A pipe into something that writes to the
+terminal (`| less -R`, `| tee /dev/tty`) is not escaped either.
 
 Results stream in as each deployment answers (completion order), so a slow
 or unreachable server no longer holds up the ones that already finished.

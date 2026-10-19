@@ -43,8 +43,8 @@ class HumanRenderer:
     ) -> None:
         self._out = out
         self._err = err
-        self._escape_out = _isatty(out)
-        self._escape_err = _isatty(err)
+        self._escape_out = is_terminal(out)
+        self._escape_err = is_terminal(err)
         self._verbose = verbose
         self._labelled = labelled
         self._held: SessionRelevanceResult | None = None
@@ -117,7 +117,8 @@ class HumanRenderer:
         return escape_controls(text) if self._escape_out else text
 
 
-def _isatty(stream: TextIO) -> bool:
+def is_terminal(stream: TextIO) -> bool:
+    """Whether `stream` is a terminal; False if it has no `isatty` or is closed."""
     try:
         return stream.isatty()
     except (AttributeError, ValueError):  # no isatty, or closed

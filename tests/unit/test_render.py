@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import io
 
-from bigfix_remote_session_relevance.render import HumanRenderer, exit_code, format_error
+from bigfix_remote_session_relevance.render import (
+    HumanRenderer,
+    exit_code,
+    format_error,
+    is_terminal,
+)
 from bigfix_remote_session_relevance.result import ResultError, SessionRelevanceResult
 from bigfix_remote_session_relevance.results import SessionRelevanceResults
 
@@ -181,6 +186,8 @@ def test_format_error() -> None:
 
 class _Tty(io.StringIO):
     def isatty(self) -> bool:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")  # as real files do
         return True
 
 
@@ -228,3 +235,32 @@ def test_format_error_escape() -> None:
     r = _bad("a", "session_relevance", "x\x1b\ny")
     assert format_error(r) == "a: session relevance error: x\x1b\ny"
     assert format_error(r, escape=True) == "a: session relevance error: x%1b\ny"
+
+
+def test_each_stream_is_escaped_only_if_it_is_a_terminal() -> None:
+    results = [_ok("a", ["x\x1by"], "t\x1b"), _bad("b", "session_relevance", "e\x1b")]
+    for out, err in ((_Tty(), io.StringIO()), (io.StringIO(), _Tty())):
+        renderer = HumanRenderer(out=out, err=err, verbose=1, labelled=True)
+        for r in results:
+            renderer.add(r)
+        renderer.close()
+        assert ("x%1by" in out.getvalue()) is isinstance(out, _Tty)
+        assert ("x\x1by" in out.getvalue()) is not isinstance(out, _Tty)
+        assert ("e%1b" in err.getvalue()) is isinstance(err, _Tty)
+        assert ("type=t%1b" in err.getvalue()) is isinstance(err, _Tty)
+
+
+def test_tty_summary_escapes_before_truncating() -> None:
+    long = "\x1b" * 200
+    out, _ = _render_tty([_ok("a", [long]), _ok("b", [long])])
+    assert "\x1b" not in out
+    assert "2× " + ("%1b" * 200)[:119] + "…\n" in out
+
+
+def test_is_terminal_is_false_for_closed_or_isatty_less_streams() -> None:
+    closed = _Tty()
+    closed.close()
+    assert is_terminal(_Tty())
+    assert not is_terminal(closed)
+    assert not is_terminal(object())  # type: ignore[arg-type]
+    assert not is_terminal(io.StringIO())
