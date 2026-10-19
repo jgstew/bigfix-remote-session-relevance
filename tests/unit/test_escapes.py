@@ -11,6 +11,7 @@ from bigfix_remote_session_relevance import (
     escape_result,
     unescape_answer,
 )
+from bigfix_remote_session_relevance.escapes import escape_controls
 
 # (as Web Reports sends it, decoded) -- observed live on 11.0.7 (issue #5).
 PAIRS = [
@@ -94,3 +95,24 @@ def test_non_ascii_unprintable_is_never_escaped(text: str) -> None:
     # widen that to every non-printable character.
     assert escape_answer(text) == text
     assert unescape_answer(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "shown"),
+    [
+        ("\x1b[31mred\x1b[0m", "%1b[31mred%1b[0m"),
+        ("one\ntwo", "one%0atwo"),
+        ("over\rwrite", "over%0dwrite"),
+        ("bell\x07 del\x7f", "bell%07 del%7f"),
+        ("csi\x9b31m nel\x85", "csi%9b31m nel%85"),  # C1 controls
+        ("a\tb", "a\tb"),  # tab moves the cursor right, nothing more
+        ("50% of %SystemRoot%", "50% of %SystemRoot%"),  # "%" stays readable
+        ("café ✓ \xa0", "café ✓ \xa0"),  # NBSP is not printable, but harmless
+    ],
+)
+def test_escape_controls_for_display(text: str, shown: str) -> None:
+    assert escape_controls(text) == shown
+
+
+def test_escape_controls_can_keep_newlines() -> None:
+    assert escape_controls("a\nb\x1b", keep_newlines=True) == "a\nb%1b"

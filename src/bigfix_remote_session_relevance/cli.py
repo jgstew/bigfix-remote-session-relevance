@@ -260,7 +260,7 @@ def _print_stream(
             elif r.raw is not None:
                 print(r.raw.text, flush=True)
             elif r.error is not None:
-                print(format_error(r), file=sys.stderr, flush=True)
+                print(format_error(r, escape=sys.stderr.isatty()), file=sys.stderr, flush=True)
     if not args.raw:
         with _TERMINAL:
             renderer.close()

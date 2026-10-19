@@ -18,6 +18,11 @@ if TYPE_CHECKING:
 
 _ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
 _ESCAPES = {c: f"%{c:02x}" for c in (ord("%"), *range(0x20), 0x7F)}  # for str.translate
+# For the terminal: C0 (but tab), DEL and C1. ESC (0x1b) and CSI (0x9b) start
+# terminal control sequences; CR, LF, NEL (0x85) and the rest move the cursor
+# or start a line, which could fake extra answers.
+_CONTROLS = {c: f"%{c:02x}" for c in (*range(0x20), *range(0x7F, 0xA0)) if c != ord("\t")}
+_CONTROLS_BUT_LF = {c: e for c, e in _CONTROLS.items() if c != ord("\n")}
 
 
 def unescape_answer(text: str) -> str:
@@ -47,6 +52,18 @@ def escape_answer(text: str) -> str:
     if "%" not in text and text.isprintable():
         return text
     return text.translate(_ESCAPES)
+
+
+def escape_controls(text: str, *, keep_newlines: bool = False) -> str:
+    """`text` safe to write to a terminal: control characters shown as ``%xx``.
+
+    For display only. C0 controls but tab, DEL and the C1 controls are
+    escaped; ``%`` is not (so ``%SystemRoot%`` stays readable), which makes
+    this lossy: ``--keep-escapes`` is the unambiguous form.
+    """
+    if text.isprintable():  # most text; C0, DEL and C1 are never printable
+        return text
+    return text.translate(_CONTROLS_BUT_LF if keep_newlines else _CONTROLS)
 
 
 def escape_result(result: SessionRelevanceResult) -> SessionRelevanceResult:

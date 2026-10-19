@@ -177,3 +177,54 @@ def test_format_error() -> None:
     assert (
         format_error(_bad("a", "session_relevance", "nope")) == "a: session relevance error: nope"
     )
+
+
+class _Tty(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+HOSTILE: list[object] = ["\x1b[31mred\x1b]0;pwned\x07", "one\ntwo", "csi\x9b2J"]
+
+
+def _render_tty(results: list[SessionRelevanceResult], verbose: int = 0) -> tuple[str, str]:
+    out, err = _Tty(), _Tty()
+    renderer = HumanRenderer(out=out, err=err, verbose=verbose, labelled=None)
+    for r in results:
+        renderer.add(r)
+    renderer.close()
+    return out.getvalue(), err.getvalue()
+
+
+def test_tty_output_shows_control_characters_as_escapes() -> None:
+    out, _ = _render_tty([_ok("a", HOSTILE)])
+    # One line per answer, and nothing that a terminal would act on.
+    assert out == "%1b[31mred%1b]0;pwned%07\none%0atwo\ncsi%9b2J\n"
+
+
+def test_tty_summary_and_verbose_metadata_are_escaped_too() -> None:
+    out, err = _render_tty(
+        [_ok("a", ["x\x1by"], "str\x1bing"), _ok("b", ["x\x1by"], "str\x1bing")], 1
+    )
+    assert "\x1b" not in out + err
+    assert "2× x%1by\n" in out
+    assert "type=str%1bing" in err
+
+
+def test_tty_errors_keep_their_lines_but_lose_escape_sequences() -> None:
+    _, err = _render_tty([_bad("a", "session_relevance", "bad\x1b[2J\nsecond line")])
+    assert err == "a: session relevance error: bad%1b[2J\nsecond line\n"
+
+
+def test_non_tty_output_is_the_answer_text_as_is() -> None:
+    # Pipes and files get the answers unchanged, for scripts; --json shows
+    # where each answer starts and ends.
+    out, err = _render([_ok("a", HOSTILE), _bad("b", "session_relevance", "e\x1b")])
+    assert out == "== a (rest) ==\n" + "".join(f"{h}\n" for h in HOSTILE)
+    assert "e\x1b" in err
+
+
+def test_format_error_escape() -> None:
+    r = _bad("a", "session_relevance", "x\x1b\ny")
+    assert format_error(r) == "a: session relevance error: x\x1b\ny"
+    assert format_error(r, escape=True) == "a: session relevance error: x%1b\ny"
