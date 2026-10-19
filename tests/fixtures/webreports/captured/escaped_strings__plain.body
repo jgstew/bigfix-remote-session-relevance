@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+	<soapenv:Body>
+		<GetRelevanceResultResponse xmlns="http://schemas.bigfix.com/Relevance">
+			<a>a%25b</a>
+			<a>a%2541</a>
+			<a>x%0ay</a>
+			<a>a%09b</a>
+			<a>a%01b</a>
+			<a>a%7fb</a>
+		</GetRelevanceResultResponse>
+	</soapenv:Body>
+</soapenv:Envelope>

@@ -8,9 +8,9 @@ from bigfix_remote_session_relevance import (
     ResultError,
     SessionRelevanceResult,
     escape_answer,
+    escape_result,
     unescape_answer,
 )
-from bigfix_remote_session_relevance.escapes import escape_result
 
 # (as Web Reports sends it, decoded) -- observed live on 11.0.7 (issue #5).
 PAIRS = [

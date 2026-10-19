@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
+from bigfix_remote_session_relevance import escape_result
 from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
 from bigfix_remote_session_relevance.backends.rest import RestBackend
 from bigfix_remote_session_relevance.backends.webreports import WebReportsBackend
@@ -301,3 +302,48 @@ async def test_extras_filter_that_is_not_a_set(backend: str, recording_transport
     assert result.error.kind == "session_relevance"
     assert result.error.http_status == 400
     assert result.error.message.startswith('Filter "computers":')
+
+
+# Issue #5: Web Reports keeps qna-style %xx escapes in answer text; REST and
+# Explorer send it decoded. REST is captured with Explorer reachable only.
+ESCAPE_SOURCES = [("rest", "via_explorer__"), ("webreports", ""), ("explorer", "")]
+ESCAPED_STRINGS = ("a%b", "a%41", "x\ny", "a\tb", "a\x01b", "a\x7fb")
+
+
+@pytest.mark.parametrize("source", ESCAPE_SOURCES, ids=lambda s: s[1] + s[0])
+async def test_escape_probes_decode_on_every_backend(
+    source: tuple[str, str], recording_transport: type
+) -> None:
+    strings = await _from_source(source, "escaped_strings", recording_transport)
+    assert strings.answers == strings.answer_strings == ESCAPED_STRINGS
+    pair = await _from_source(source, "escaped_tuple", recording_transport)
+    assert pair.answers == (("a%b", 1),)
+    error = await _from_source(source, "error_escaped", recording_transport)
+    assert error.error is not None
+    # message is whitespace-normalized; detail keeps the server's text (a tab).
+    assert error.error.message == "User-defined error: a%b c"
+    assert error.error.detail is not None
+    assert "a%b\tc" in error.error.detail
+
+
+@pytest.mark.parametrize("source", ESCAPE_SOURCES, ids=lambda s: s[1] + s[0])
+async def test_escape_result_gives_web_reports_text_on_every_backend(
+    source: tuple[str, str], recording_transport: type
+) -> None:
+    result = escape_result(await _from_source(source, "escaped_strings", recording_transport))
+    # Exactly the <String> leaves of the captured Web Reports response.
+    assert result.answers == ("a%25b", "a%2541", "x%0ay", "a%09b", "a%01b", "a%7fb")
+
+
+async def test_webreports_plain_method_decodes_escapes(recording_transport: type) -> None:
+    async def plain(key: str) -> Any:
+        return await _evaluate("webreports", key, recording_transport, soap_method="plain")
+
+    assert (await plain("escaped_strings__plain")).answers == ESCAPED_STRINGS
+    assert (await plain("escaped_tuple__plain")).answers == ("a%b, 1",)
+    error = await plain("error_escaped__plain")
+    assert error.error is not None
+    # message is whitespace-normalized; detail keeps the server's text (a tab).
+    assert error.error.message == "User-defined error: a%b c"
+    assert error.error.detail is not None
+    assert "a%b\tc" in error.error.detail

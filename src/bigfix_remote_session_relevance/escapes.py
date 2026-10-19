@@ -25,7 +25,9 @@ def unescape_answer(text: str) -> str:
 
     One pass, so ``a%2541`` is ``a%41``, not ``aA``. A ``%`` not followed by
     two hex digits is left as is. Every escaped character is ASCII, so
-    ``chr()`` of the byte is the character.
+    ``chr()`` of the byte is the character. Any ``%XX`` is decoded, not only
+    the ones Web Reports produces, so this is for Web Reports' answer text,
+    where a literal ``%`` is always ``%25``.
     """
     if "%" not in text:  # most answers: skip the regex
         return text

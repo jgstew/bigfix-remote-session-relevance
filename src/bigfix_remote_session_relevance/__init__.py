@@ -20,7 +20,7 @@ from .backends.saas import SaasBackend
 from .backends.webreports import WebReportsBackend
 from .client import AsyncSessionRelevanceClient
 from .config import Config, ConnectionConfig, default_config_path, load_config
-from .escapes import escape_answer, unescape_answer
+from .escapes import escape_answer, escape_result, unescape_answer
 from .exceptions import (
     AuthenticationError,
     BackendConnectionError,
@@ -76,6 +76,7 @@ __all__ = [
     "async_evaluate_session_relevance",
     "default_config_path",
     "escape_answer",
+    "escape_result",
     "evaluate_session_relevance",
     "load_config",
     "supports_explorer_extras",

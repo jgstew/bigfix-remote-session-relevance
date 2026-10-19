@@ -390,3 +390,22 @@ def test_keep_escapes(config_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert {r["answers"][0] for r in json.loads(capsys.readouterr().out)} == {"a\tb"}
     assert _run(["--json", "--keep-escapes", "q"], routes) == 0
     assert {r["answers"][0] for r in json.loads(capsys.readouterr().out)} == {"a%09b"}
+
+
+def test_keep_escapes_text_output(config_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    routes = {"dev-wr": _wr("<String>x%0ay</String>")}
+    assert _run(["--connection", "dev-wr", "q"], routes) == 0
+    assert capsys.readouterr().out == "x\ny\n"  # one answer, two lines
+    assert _run(["--connection", "dev-wr", "--keep-escapes", "q"], routes) == 0
+    assert capsys.readouterr().out == "x%0ay\n"
+
+
+def test_keep_escapes_with_keys(config_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    routes = {
+        "dev-root": httpx.Response(
+            200, json={"result": [{"name": "a\tb"}], "plural": True, "type": "string"}
+        )
+    }
+    argv = ["--json", "--connection", "dev-root", "--keys", "name", "--keep-escapes", "q"]
+    assert _run(argv, routes) == 0
+    assert json.loads(capsys.readouterr().out)[0]["answers"] == [{"name": "a%09b"}]

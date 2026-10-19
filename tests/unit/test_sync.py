@@ -249,7 +249,7 @@ def test_stream_keeps_an_otherwise_unreferenced_client_alive() -> None:
     assert [r.answers for r in stream] == [(42,)]
 
 
-def test_keep_escapes_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_keep_escapes_passes_through() -> None:
     decoded = httpx.Response(200, json={"result": ["a%b"], "plural": False, "type": "string"})
 
     def factory(conn: ConnectionConfig) -> httpx.AsyncBaseTransport:
@@ -260,6 +260,10 @@ def test_keep_escapes_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
         assert client.evaluate("q", unescape=False)[0].answers == ("a%25b",)
         assert [r.answers for r in client.evaluate_stream("q", unescape=False)] == [("a%25b",)]
         assert client.evaluate_many(["q"], unescape=False)[0][0].answers == ("a%25b",)
+        explorer = client.evaluate_explorer("q", keys="id", unescape=False)
+        assert [r.answers for r in explorer] == [("a%25b",)]  # REST forwards extras
+        streamed = client.evaluate_explorer_stream("q", keys="id", unescape=False)
+        assert [r.answers for r in streamed] == [("a%25b",)]
     one_shot = evaluate_session_relevance(
         "q", config=_config(), transport_factory=factory, trust=None, unescape=False
     )

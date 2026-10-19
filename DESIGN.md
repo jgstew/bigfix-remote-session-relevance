@@ -216,6 +216,10 @@ key.
 
 String answers are the text the session relevance evaluates to, on every
 backend (Web Reports' `%xx` escapes are decoded; see § Web Reports SOAP).
+**(observed, 11.0.7)** REST with Explorer reachable, Explorer and SaaS send
+that text already decoded (captures `escaped_*`; SaaS checked live). REST
+without a reachable Explorer, where the root server evaluates the query
+itself, has not been checked yet.
 `unescape=False` on any `evaluate*` method (CLI `--keep-escapes`) asks for
 the escaped form instead: `%` and 0x00–0x1F/0x7F as lowercase `%xx`, which is
 what Web Reports and the client's qna print, and makes control characters
@@ -224,8 +228,12 @@ visible. The client applies `escape_answer` to every string in `answers`
 `answer_strings`. It does this after the backend has answered, so the
 escaped form is the same whichever backend answered, and no backend's
 `evaluate()` changes. Errors and `raw` are never escaped.
-`escape_answer` and `unescape_answer` are exported; for Web Reports' text
-`escape_answer(unescape_answer(t)) == t` (checked live on 11.0.7).
+`escape_answer`, `unescape_answer` and `escape_result` (the same step for a
+`SessionRelevanceResult` from a backend used directly) are exported. For Web
+Reports' text `escape_answer(unescape_answer(t)) == t`, checked live on
+11.0.7 for every character class the issue #5 probes cover. `unescape_answer`
+decodes any `%XX`, not only the characters Web Reports escapes, so it is not
+meant for arbitrary text.
 
 ### Errors
 

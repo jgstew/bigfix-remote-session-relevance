@@ -625,11 +625,48 @@ async def test_keep_escapes_agrees_on_every_backend() -> None:
 
 
 async def test_keep_escapes_on_explorer_extras() -> None:
+    # Explorer `keys` answers are dicts: values are answer text, keys are not.
     conns = [_conn("e", "explorer", D1)]
-    decoded = httpx.Response(200, json={"result": ["a\tb"], "plural": True, "type": "string"})
-    async with _client(conns, Router({"e": [decoded]})) as client:
-        results = await client.evaluate_explorer("q", keys="name", unescape=False)
+    body = {
+        "result": [{"id": 1, "name": {"label": "a\tb", "flag": True}}],
+        "plural": True,
+        "type": "( integer, ( string, boolean ) )",
+    }
+    async with _client(conns, Router({"e": [httpx.Response(200, json=body)]})) as client:
+        keys = "{id name {label flag}}"
+        results = await client.evaluate_explorer("q", keys=keys, unescape=False)
         streamed = [
-            r async for r in client.evaluate_explorer_stream("q", keys="name", unescape=False)
+            r async for r in client.evaluate_explorer_stream("q", keys=keys, unescape=False)
         ]
-    assert results[0].answers == streamed[0].answers == ("a%09b",)
+    expected = ({"id": 1, "name": {"label": "a%09b", "flag": True}},)
+    assert results[0].answers == streamed[0].answers == expected
+    assert "a%09b" in results[0].answer_strings[0]
+
+
+async def test_keep_escapes_on_webreports_plain_method() -> None:
+    fault = httpx.Response(
+        500,
+        headers={"content-type": "text/xml"},
+        text=(
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+            "<soapenv:Body><soapenv:Fault><faultcode>soapenv:Server</faultcode>"
+            "<faultstring>No such operation 'GetStructuredRelevanceResult'</faultstring>"
+            "</soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+        ),
+    )
+    plain = httpx.Response(
+        200,
+        headers={"content-type": "text/xml"},
+        text=(
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<soapenv:Body><GetRelevanceResultResponse xmlns="http://schemas.bigfix.com/'
+            'Relevance"><a>a%25b</a><a>x%0ay</a></GetRelevanceResultResponse>'
+            "</soapenv:Body></soapenv:Envelope>"
+        ),
+    )
+    conns = [_conn("w", "webreports", D1)]
+    async with _client(conns, Router({"w": [fault, plain, plain]})) as client:
+        decoded = await client.evaluate("q")
+        escaped = await client.evaluate("q", unescape=False)
+    assert decoded[0].answers == ("a%b", "x\ny")
+    assert escaped[0].answers == ("a%25b", "x%0ay")
