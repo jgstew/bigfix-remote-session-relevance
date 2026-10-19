@@ -40,6 +40,10 @@ the form for `EXPLORER_RECHECK_SECONDS` (300 s) before trying JSON again.
 If Explorer returns during that window the form fails every query with
 "character which is not allowed"; that error triggers one JSON retry, and a
 503 on the retry means the error was genuine (e.g. `1.5`). **(observed)**
+Relevance that is itself valid JSON (`"hello"`, `1`, `true`, `"a%09b"`)
+fails differently then, with 400 "Invalid JSON ... expected type: object",
+which triggers the same retry (issue #6; seen live by
+bigfix-relevance-debugger, not yet reproduced against this backend).
 With Explorer registered but down, every REST query takes ~3 s (JSON 503 and
 form alike): the root server waits for Explorer before answering itself.
 Both paths are verified live: `+`, `&`, `<`, `'`, `\`, `/`, `?`, `#` round-trip,

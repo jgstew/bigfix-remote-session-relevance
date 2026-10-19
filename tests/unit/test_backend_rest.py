@@ -283,3 +283,54 @@ async def test_genuine_disallowed_character_error_is_kept(recording_transport: t
     assert result.error.message == "This expression contained a character which is not allowed."
     # Fallback still active afterwards: the last query went straight to the form.
     assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
+
+
+# What the root server answers when Explorer is back and the form value is
+# itself valid JSON (seen live 2026-10-18 for "hello", 1, true and "a%09b").
+INVALID_JSON_BODY = "Invalid JSON: expected type: object"
+
+
+def _invalid_json() -> httpx.Response:
+    return httpx.Response(400, text=INVALID_JSON_BODY, headers={"content-type": "text/plain"})
+
+
+async def test_explorer_returning_during_fallback_detected_on_invalid_json(
+    recording_transport: type,
+) -> None:
+    # JSON-shaped relevance does not fail with "not allowed" once Explorer is
+    # back; the form value parses as JSON and the server answers 400 "Invalid
+    # JSON". That must trigger the JSON retry too, and end the fallback.
+    ok = httpx.Response(200, json={"result": ["hello"], "plural": False, "type": "string"})
+    rec = recording_transport([NO_EXPLORER, ok, _invalid_json(), ok, ok])
+    async with _backend(rec) as backend:
+        await backend.evaluate('"hello"')  # JSON 503 -> form: fallback starts
+        result = await backend.evaluate('"hello"')  # form 400 -> JSON retry succeeds
+        assert backend._form_until == 0.0
+        await backend.evaluate('"hello"')  # back on JSON
+    assert result.ok
+    assert result.answers == ("hello",)
+    assert [r.headers["content-type"] for r in rec.requests] == [
+        "application/json+relevance",
+        "application/x-www-form-urlencoded",
+        "application/x-www-form-urlencoded",
+        "application/json+relevance",
+        "application/json+relevance",
+    ]
+
+
+async def test_invalid_json_error_kept_when_explorer_still_down(
+    recording_transport: type,
+) -> None:
+    # A 503 on the retry means Explorer is still down: keep the form's error
+    # and stay in the fallback.
+    ok = httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
+    rec = recording_transport([NO_EXPLORER, ok, _invalid_json(), NO_EXPLORER, ok])
+    async with _backend(rec) as backend:
+        await backend.evaluate("1")
+        result = await backend.evaluate('"hello"')
+        assert backend._form_until > 0.0
+        await backend.evaluate("1")
+    assert result.error is not None
+    assert result.error.http_status == 400
+    assert result.error.message == INVALID_JSON_BODY
+    assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
