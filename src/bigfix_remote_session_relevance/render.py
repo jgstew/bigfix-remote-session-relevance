@@ -2,6 +2,11 @@
 
 Answers go to stdout and nothing else does, so output pipes cleanly;
 errors, metadata (``-v``) and notices go to stderr.
+
+Answer and error text comes from the server. Written to a terminal, its
+control characters are shown as ``%xx`` (`escape_controls`), so it can't send
+the terminal escape sequences or make one answer look like several. Written
+to a pipe or file, it is left as is, for scripts.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ from collections.abc import Sequence
 from typing import TextIO
 
 from .client import without_attempts
+from .escapes import escape_controls
 from .result import SessionRelevanceResult
 from .results import UNREACHABLE_KINDS, SessionRelevanceResults
 
@@ -29,6 +35,7 @@ class HumanRenderer:
     second result shows (labelled) or the run ends (bare answers).
     Unreachable errors are held back too: with no ``-v`` they are hidden
     when another deployment answered, which is only known once all are in.
+    Server text is escaped on whichever of ``out`` and ``err`` is a terminal.
     """
 
     def __init__(
@@ -36,6 +43,8 @@ class HumanRenderer:
     ) -> None:
         self._out = out
         self._err = err
+        self._escape_out = is_terminal(out)
+        self._escape_err = is_terminal(err)
         self._verbose = verbose
         self._labelled = labelled
         self._held: SessionRelevanceResult | None = None
@@ -62,7 +71,7 @@ class HumanRenderer:
             self._labelled = False  # never got past one shown result
             self._release()
         if self._labelled:
-            summary = render_summary(self._shown)
+            summary = render_summary(self._shown, escape=self._escape_out)
             if summary:
                 self._out.write(f"\n{summary}")
                 self._out.flush()
@@ -89,24 +98,42 @@ class HumanRenderer:
         if r.ok:
             if self._labelled:
                 self._out.write(f"== {_label(r)} ==\n")
-            self._out.writelines(f"{line}\n" for line in r.answer_strings)
+            self._out.writelines(f"{self._answer(line)}\n" for line in r.answer_strings)
             # Flushed per result: piped stdout is block-buffered, which would
             # hold every answer back until the slowest deployment is done.
             self._out.flush()
             if self._verbose:
                 time = "?" if r.evaluation_time_ms is None else f"{r.evaluation_time_ms:g}"
+                type_ = escape_controls(r.type) if self._escape_err and r.type else r.type
                 self._err.write(
-                    f"# connection={r.connection} backend={r.backend} type={r.type} "
+                    f"# connection={r.connection} backend={r.backend} type={type_} "
                     f"plural={r.plural} count={r.count} time={time}ms\n"
                 )
         elif r.error is not None:
-            self._err.write(f"{format_error(r)}\n")
+            self._err.write(f"{format_error(r, escape=self._escape_err)}\n")
         self._err.flush()
 
+    def _answer(self, text: str) -> str:
+        return escape_controls(text) if self._escape_out else text
 
-def format_error(r: SessionRelevanceResult) -> str:
-    """The one-line stderr form of a failed result."""
+
+def is_terminal(stream: TextIO) -> bool:
+    """Whether `stream` is a terminal; False if it has no `isatty` or is closed."""
+    try:
+        return stream.isatty()
+    except (AttributeError, ValueError):  # no isatty, or closed
+        return False
+
+
+def format_error(r: SessionRelevanceResult, *, escape: bool = False) -> str:
+    """The stderr form of a failed result.
+
+    ``escape`` is for a terminal: the message keeps its line breaks
+    (it is one error, on stderr) but loses every other control character.
+    """
     kind, message = (r.error.kind, r.error.message) if r.error else ("unknown", "")
+    if escape:
+        message = escape_controls(message, keep_newlines=True)
     return f"{r.connection}: {_kind_label(kind)} error: {message}"
 
 
@@ -127,7 +154,7 @@ def _summary_key(r: SessionRelevanceResult) -> tuple[object, ...]:
     return (error, r.answer_strings, r.type)
 
 
-def _summary_answer(r: SessionRelevanceResult) -> str:
+def _summary_answer(r: SessionRelevanceResult, *, escape: bool) -> str:
     """One line standing for a group's shared answer."""
     if r.error is not None:
         text = (
@@ -135,12 +162,14 @@ def _summary_answer(r: SessionRelevanceResult) -> str:
         )
     else:
         text = " | ".join(r.answer_strings) or "(no answers)"
+    if escape:
+        text = escape_controls(text)
     if len(text) > _SUMMARY_ANSWER_CHARS:
         text = text[: _SUMMARY_ANSWER_CHARS - 1] + "…"
     return text
 
 
-def render_summary(results: Sequence[SessionRelevanceResult]) -> str:
+def render_summary(results: Sequence[SessionRelevanceResult], *, escape: bool = False) -> str:
     """Identical answers collapsed, most common first, ties in arrival order.
 
     Empty when nothing collapses: every group would hold one result and the
@@ -155,7 +184,7 @@ def render_summary(results: Sequence[SessionRelevanceResult]) -> str:
     distinct = "answer" if len(groups) == 1 else "answers"
     lines = [f"== summary: {_plural(len(results), 'result')}, {len(groups)} distinct {distinct}"]
     for members in order:
-        lines.append(f"{len(members)}× {_summary_answer(members[0])}")
+        lines.append(f"{len(members)}× {_summary_answer(members[0], escape=escape)}")
         lines.append("    " + ", ".join(_label(m) for m in members))
     return "".join(f"{line}\n" for line in lines)
 

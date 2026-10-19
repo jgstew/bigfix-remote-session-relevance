@@ -409,3 +409,54 @@ def test_keep_escapes_with_keys(config_path: Path, capsys: pytest.CaptureFixture
     argv = ["--json", "--connection", "dev-root", "--keys", "name", "--keep-escapes", "q"]
     assert _run(argv, routes) == 0
     assert json.loads(capsys.readouterr().out)[0]["answers"] == [{"name": "a%09b"}]
+
+
+def _hostile_routes() -> dict[str, Any]:
+    return {
+        "dev-root": httpx.Response(
+            200, json={"result": ["\x1b[31mred", "one\ntwo"], "plural": True, "type": "string"}
+        ),
+    }
+
+
+def test_tty_text_output_escapes_control_characters(
+    config_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    assert _run(["--connection", "dev-root", "q"], _hostile_routes()) == 0
+    assert capsys.readouterr().out == "%1b[31mred\none%0atwo\n"
+
+
+def test_piped_text_output_is_unchanged(
+    config_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--connection", "dev-root", "q"], _hostile_routes()) == 0
+    assert capsys.readouterr().out == "\x1b[31mred\none\ntwo\n"
+
+
+@pytest.mark.parametrize("flag", ["--json", "--raw"])
+def test_tty_never_changes_json_or_raw(
+    flag: str,
+    config_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    assert _run(["--connection", "dev-root", flag, "q"], _hostile_routes()) == 0
+    out = capsys.readouterr().out
+    if flag == "--json":
+        assert json.loads(out)[0]["answers"] == ["\x1b[31mred", "one\ntwo"]
+    else:
+        assert '"\\u001b[31mred"' in out  # the server's JSON, as it sent it
+
+
+def test_tty_raw_mode_error_line_is_escaped(
+    config_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys.stderr, "isatty", lambda: True)
+    # A connection error has no raw response, so --raw prints the error line.
+    routes = {"dev-wr": httpx.ConnectError("bad\x1b[2J")}
+    _run(["--connection", "dev-wr", "--raw", "q"], routes)
+    err = capsys.readouterr().err
+    assert "\x1b" not in err
+    assert "bad%1b[2J" in err

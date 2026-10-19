@@ -84,9 +84,21 @@ bigfix-remote-session-relevance --show-config                   # connections, n
 bigfix-remote-session-relevance --show-certs | --trust-cert NAME | --forget-cert HOST:PORT
 ```
 
-Answers go to stdout; errors and `-v` metadata go to stderr. An answer
-containing a newline prints as several lines; `--keep-escapes` shows it as
-one (`x%0ay`), with any other control character visible too.
+Answers go to stdout; errors and `-v` metadata go to stderr.
+
+Answer text comes from the server, so plain-text output to a **terminal**
+shows control characters as `%xx`: ESC, CR, LF, the other C0 controls except
+tab, DEL and the C1 controls (0x80–0x9F). An answer can't recolour or clear
+your terminal, and an answer containing a newline stays on one line
+(`x%0ay`). `%` itself is left as is, so `%SystemRoot%` stays readable; use
+`--keep-escapes` for the unambiguous form, where `%` is `%25`. Error messages
+on a terminal keep their line breaks but lose the other control characters.
+
+Output to a **pipe or file** is the answer text as is, one answer per line,
+so an answer containing a newline prints as several lines. Use `--json` when
+the answer boundaries matter, or `--keep-escapes`. `--json` and `--raw` are
+never changed, terminal or not. A pipe into something that writes to the
+terminal (`| less -R`, `| tee /dev/tty`) is not escaped either.
 
 Results stream in as each deployment answers (completion order), so a slow
 or unreachable server no longer holds up the ones that already finished.

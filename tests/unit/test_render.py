@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import io
 
-from bigfix_remote_session_relevance.render import HumanRenderer, exit_code, format_error
+from bigfix_remote_session_relevance.render import (
+    HumanRenderer,
+    exit_code,
+    format_error,
+    is_terminal,
+)
 from bigfix_remote_session_relevance.result import ResultError, SessionRelevanceResult
 from bigfix_remote_session_relevance.results import SessionRelevanceResults
 
@@ -177,3 +182,85 @@ def test_format_error() -> None:
     assert (
         format_error(_bad("a", "session_relevance", "nope")) == "a: session relevance error: nope"
     )
+
+
+class _Tty(io.StringIO):
+    def isatty(self) -> bool:
+        if self.closed:
+            raise ValueError("I/O operation on closed file")  # as real files do
+        return True
+
+
+HOSTILE: list[object] = ["\x1b[31mred\x1b]0;pwned\x07", "one\ntwo", "csi\x9b2J"]
+
+
+def _render_tty(results: list[SessionRelevanceResult], verbose: int = 0) -> tuple[str, str]:
+    out, err = _Tty(), _Tty()
+    renderer = HumanRenderer(out=out, err=err, verbose=verbose, labelled=None)
+    for r in results:
+        renderer.add(r)
+    renderer.close()
+    return out.getvalue(), err.getvalue()
+
+
+def test_tty_output_shows_control_characters_as_escapes() -> None:
+    out, _ = _render_tty([_ok("a", HOSTILE)])
+    # One line per answer, and nothing that a terminal would act on.
+    assert out == "%1b[31mred%1b]0;pwned%07\none%0atwo\ncsi%9b2J\n"
+
+
+def test_tty_summary_and_verbose_metadata_are_escaped_too() -> None:
+    out, err = _render_tty(
+        [_ok("a", ["x\x1by"], "str\x1bing"), _ok("b", ["x\x1by"], "str\x1bing")], 1
+    )
+    assert "\x1b" not in out + err
+    assert "2× x%1by\n" in out
+    assert "type=str%1bing" in err
+
+
+def test_tty_errors_keep_their_lines_but_lose_escape_sequences() -> None:
+    _, err = _render_tty([_bad("a", "session_relevance", "bad\x1b[2J\nsecond line")])
+    assert err == "a: session relevance error: bad%1b[2J\nsecond line\n"
+
+
+def test_non_tty_output_is_the_answer_text_as_is() -> None:
+    # Pipes and files get the answers unchanged, for scripts; --json shows
+    # where each answer starts and ends.
+    out, err = _render([_ok("a", HOSTILE), _bad("b", "session_relevance", "e\x1b")])
+    assert out == "== a (rest) ==\n" + "".join(f"{h}\n" for h in HOSTILE)
+    assert "e\x1b" in err
+
+
+def test_format_error_escape() -> None:
+    r = _bad("a", "session_relevance", "x\x1b\ny")
+    assert format_error(r) == "a: session relevance error: x\x1b\ny"
+    assert format_error(r, escape=True) == "a: session relevance error: x%1b\ny"
+
+
+def test_each_stream_is_escaped_only_if_it_is_a_terminal() -> None:
+    results = [_ok("a", ["x\x1by"], "t\x1b"), _bad("b", "session_relevance", "e\x1b")]
+    for out, err in ((_Tty(), io.StringIO()), (io.StringIO(), _Tty())):
+        renderer = HumanRenderer(out=out, err=err, verbose=1, labelled=True)
+        for r in results:
+            renderer.add(r)
+        renderer.close()
+        assert ("x%1by" in out.getvalue()) is isinstance(out, _Tty)
+        assert ("x\x1by" in out.getvalue()) is not isinstance(out, _Tty)
+        assert ("e%1b" in err.getvalue()) is isinstance(err, _Tty)
+        assert ("type=t%1b" in err.getvalue()) is isinstance(err, _Tty)
+
+
+def test_tty_summary_escapes_before_truncating() -> None:
+    long = "\x1b" * 200
+    out, _ = _render_tty([_ok("a", [long]), _ok("b", [long])])
+    assert "\x1b" not in out
+    assert "2× " + ("%1b" * 200)[:119] + "…\n" in out
+
+
+def test_is_terminal_is_false_for_closed_or_isatty_less_streams() -> None:
+    closed = _Tty()
+    closed.close()
+    assert is_terminal(_Tty())
+    assert not is_terminal(closed)
+    assert not is_terminal(object())  # type: ignore[arg-type]
+    assert not is_terminal(io.StringIO())

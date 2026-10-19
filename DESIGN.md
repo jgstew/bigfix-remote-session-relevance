@@ -292,6 +292,17 @@ server's text.
   tried) are collapsed, most common first. Printed
   to stdout only when something collapses. Unreachable results hidden
   without `-v` are left out of it.
+- **CLI terminal safety**: answer text, error messages and the answer type
+  come from the server. When the plain-text output goes to a terminal
+  (`isatty()`, checked per stream), the renderer passes them through
+  `escapes.escape_controls`: C0 controls except tab, DEL and C1 (0x80–0x9F)
+  become `%xx`, so server data can't send terminal escape sequences (ESC,
+  CSI) or fake extra answer lines (LF, CR, NEL). Error messages keep LF: an
+  error is one message on stderr. `%` is not escaped, to keep text such as
+  `%SystemRoot%` readable, so the display is lossy; `--keep-escapes` is the
+  unambiguous form. Output to a pipe or file is unchanged, for scripts.
+  This is display only: `answers`, `answer_strings`, `--json` and `--raw`
+  are never changed, and neither is any backend's `evaluate()`.
 
 ## TLS: trust on first use
 

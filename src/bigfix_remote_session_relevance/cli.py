@@ -22,7 +22,7 @@ from .backends.explorer_extras import explorer_body
 from .client import TransportFactory
 from .config import Config, load_config, redacted_summary, resolve_config_path
 from .exceptions import ConfigError
-from .render import EXIT_USAGE, HumanRenderer, exit_code, format_error
+from .render import EXIT_USAGE, HumanRenderer, exit_code, format_error, is_terminal
 from .result import SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .server_address import normalize_server
@@ -260,7 +260,7 @@ def _print_stream(
             elif r.raw is not None:
                 print(r.raw.text, flush=True)
             elif r.error is not None:
-                print(format_error(r), file=sys.stderr, flush=True)
+                print(format_error(r, escape=is_terminal(sys.stderr)), file=sys.stderr, flush=True)
     if not args.raw:
         with _TERMINAL:
             renderer.close()
