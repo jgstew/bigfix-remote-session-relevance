@@ -114,8 +114,14 @@ def test_error_kinds_are_the_designed_set() -> None:
         "http",
         "response_format",
         "unsupported_feature",
-        "not_implemented",
     )
+
+
+def test_no_reserved_kind_for_unbuilt_backends() -> None:
+    # Every configurable backend is built; a kind nothing produces would be
+    # frozen by 1.0 for nothing.
+    assert not hasattr(exceptions, "BackendNotImplementedError")
+    assert "not_implemented" not in exceptions.EXCEPTION_FOR_KIND
 
 
 @pytest.mark.parametrize("kind", ERROR_KINDS)

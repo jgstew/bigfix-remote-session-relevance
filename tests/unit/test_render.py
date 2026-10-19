@@ -264,3 +264,16 @@ def test_is_terminal_is_false_for_closed_or_isatty_less_streams() -> None:
     assert not is_terminal(closed)
     assert not is_terminal(object())  # type: ignore[arg-type]
     assert not is_terminal(io.StringIO())
+
+
+def test_exit_codes_are_the_documented_values() -> None:
+    # README's exit code table; part of the 1.0 compatibility promise.
+    from bigfix_remote_session_relevance import render
+
+    assert (
+        render.EXIT_OK,
+        render.EXIT_RELEVANCE_ERROR,
+        render.EXIT_NOTHING_REACHABLE,
+        render.EXIT_PARTIAL,
+        render.EXIT_USAGE,
+    ) == (0, 1, 2, 3, 64)

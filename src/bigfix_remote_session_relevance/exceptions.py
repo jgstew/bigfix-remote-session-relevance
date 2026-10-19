@@ -55,10 +55,6 @@ class UnsupportedFeatureError(SessionRelevanceError):
     """An Explorer extra was requested from a backend that cannot provide it."""
 
 
-class BackendNotImplementedError(SessionRelevanceError):
-    """The configured backend type exists in the schema but is not built yet."""
-
-
 class ConfigError(SessionRelevanceError):
     """The connection configuration is invalid."""
 
@@ -72,5 +68,4 @@ EXCEPTION_FOR_KIND: dict[str, type[SessionRelevanceError]] = {
     "http": HTTPStatusError,
     "response_format": ResponseFormatError,
     "unsupported_feature": UnsupportedFeatureError,
-    "not_implemented": BackendNotImplementedError,
 }

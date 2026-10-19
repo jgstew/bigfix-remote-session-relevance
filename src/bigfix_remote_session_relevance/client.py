@@ -49,7 +49,7 @@ Mode = Literal["per_deployment", "all"]
 TransportFactory = Callable[[ConnectionConfig], httpx.AsyncBaseTransport | None]
 
 FAILOVER_KINDS = frozenset(
-    {"connection", "timeout", "tls", "authentication", "http", "response_format", "not_implemented"}
+    {"connection", "timeout", "tls", "authentication", "http", "response_format"}
 )
 # TLS failures that mean "this server may be an impostor": never route around them.
 _NO_FAILOVER_TLS_CODES = frozenset({"pin_mismatch", "pinned_cert_invalid"})

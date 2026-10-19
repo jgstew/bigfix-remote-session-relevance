@@ -24,7 +24,6 @@ from .escapes import escape_answer, escape_result, unescape_answer
 from .exceptions import (
     AuthenticationError,
     BackendConnectionError,
-    BackendNotImplementedError,
     BackendTimeoutError,
     ConfigError,
     HTTPStatusError,
@@ -49,7 +48,6 @@ __all__ = [
     "AuthenticationError",
     "Backend",
     "BackendConnectionError",
-    "BackendNotImplementedError",
     "BackendTimeoutError",
     "CertInfo",
     "Config",
