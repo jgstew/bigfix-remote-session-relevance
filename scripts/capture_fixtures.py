@@ -57,6 +57,25 @@ QUERIES = {
     "escaped_strings": '("a%25b"; "a%2541"; "x%0Ay"; "a%09b"; "a%01b"; "a%7Fb")',
     "escaped_tuple": '("a%25b", 1)',
     "error_escaped": 'error "a%25b%09c"',
+    # Types beyond integer/string/boolean/time. "float" above is a literal
+    # 1.5, which session relevance rejects; these are real floating points.
+    # The server's JSON number text is what Web Reports sends as text.
+    "floating_point": '"1.5" as floating point',
+    "floating_point_plural": '("1.5" as floating point; "-2.25" as floating point; '
+    '"3" as floating point)',
+    "floating_point_small": '"0.000001234" as floating point',
+    "floating_point_large": '"1e300" as floating point',
+    "date": 'date "17 Oct 2026"',
+    "time_of_day": 'time_of_day "13:45:00"',
+    "time_interval": "(now - (now - 90*minute))",
+    # Three parts: a four-part version looks like an IPv4 address to redact().
+    "version": '"11.0.7" as version',
+    "date_parts": "(day_of_week of it, month of it, year of it, day_of_month of it, "
+    'month_and_year of it) of date "17 Oct 2026"',
+    "big_integer": "9223372036854775807",
+    "negative_integer": "(0 - 5)",
+    "empty_string": '""',
+    "tuple_mixed": '(date "17 Oct 2026", "1.5" as floating point, "1.2" as version)',
 }
 REDACTED_GATHER = "http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite"
 _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")

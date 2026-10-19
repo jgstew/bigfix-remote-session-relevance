@@ -67,6 +67,50 @@ SUCCESS = {
     "nested_tuple": (((1, (2, "x")),), "( integer, ( integer, string ) )", False),
 }
 
+# Types beyond integer/string/boolean/time, captured with Explorer reachable
+# (so REST has only its via_explorer__ form). Web Reports sends floating
+# points as <FloatingPoint> and every other type here as <String>; the REST
+# API and Explorer send floating points as JSON numbers whose text is the
+# same as Web Reports'. Only integer and boolean become Python numbers.
+TYPED_SOURCES = [s for s in SOURCES if s != ("rest", "")]
+TYPED_IDS = [i for s, i in zip(SOURCES, SOURCE_IDS, strict=True) if s != ("rest", "")]
+TYPED = {
+    "floating_point": (("1.5",), "floating point", False),
+    "floating_point_plural": (("1.5", "-2.25", "3.0"), "floating point", True),
+    "floating_point_small": (("0.000001234",), "floating point", False),
+    "floating_point_large": (("1.0e+300",), "floating point", False),
+    "date": (("Sat, 17 Oct 2026",), "date", False),
+    "time_of_day": (("13:45:00",), "time of day", False),
+    "time_interval": (("01:30:00",), "time interval", False),
+    "version": (("11.0.7",), "version", False),
+    "date_parts": (
+        (("Saturday", "October", "2026", "17", "October 2026"),),
+        "( day of week, month, year, day of month, month and year )",
+        False,
+    ),
+    "big_integer": ((9223372036854775807,), "integer", False),
+    "negative_integer": ((-5,), "integer", False),
+    "empty_string": (("",), "string", False),
+    "tuple_mixed": (
+        (("Sat, 17 Oct 2026", "1.5", "1.2"),),
+        "( date, floating point, version )",
+        False,
+    ),
+}
+
+
+@pytest.mark.parametrize("source", TYPED_SOURCES, ids=TYPED_IDS)
+@pytest.mark.parametrize("key", sorted(TYPED))
+async def test_typed_cases(source: tuple[str, str], key: str, recording_transport: type) -> None:
+    result = await _from_source(source, key, recording_transport)
+    answers, type_, plural = TYPED[key]
+    assert result.ok, result.error
+    assert (result.answers, result.type, result.plural) == (answers, type_, plural)
+    assert result.answer_strings == tuple(
+        ", ".join(str(v) for v in a) if isinstance(a, tuple) else str(a) for a in answers
+    )
+
+
 ERRORS = {
     "error_unknown": 'The operator "foo bar baz" is not defined.',
     "error_type": 'The operator "plus" is not defined.',

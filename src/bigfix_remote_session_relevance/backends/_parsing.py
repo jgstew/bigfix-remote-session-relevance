@@ -7,7 +7,6 @@ see which one arrived.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import TYPE_CHECKING, Any
 from xml.etree.ElementTree import ParseError
@@ -17,6 +16,7 @@ import httpx
 from defusedxml import DefusedXmlException
 
 from ..result import RawResponse, ResultError, SessionRelevanceResult
+from ..value_types import loads_json
 from .base import error_from_status, normalize_relevance_error
 
 if TYPE_CHECKING:
@@ -45,7 +45,7 @@ def parse_session_relevance_response(
         )
     if raw.format == "json":
         try:
-            data = json.loads(raw.text)
+            data = loads_json(raw.text)
         except ValueError as exc:
             return _format_error(session_relevance, raw, backend, f"invalid JSON: {exc}")
         return _from_json(session_relevance, data, response, raw, backend)

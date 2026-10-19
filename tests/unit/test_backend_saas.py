@@ -173,6 +173,32 @@ SUCCESS = {
     "singular_string": (("hello",), "string", False),
     "time": (("Sat, 17 Oct 2026 23:11:52 +0000",), "time", False),
     "deployment_id": (("5" * 64,), "string", False),
+    # The same type probes as the on-prem captures (test_captured_fixtures
+    # TYPED). Non-numeric types match them exactly.
+    "date": (("Sat, 17 Oct 2026",), "date", False),
+    "time_of_day": (("13:45:00",), "time of day", False),
+    "time_interval": (("01:30:00",), "time interval", False),
+    "version": (("11.0.7",), "version", False),
+    "date_parts": (
+        (("Saturday", "October", "2026", "17", "October 2026"),),
+        "( day of week, month, year, day of month, month and year )",
+        False,
+    ),
+    "negative_integer": ((-5,), "integer", False),
+    "empty_string": (("",), "string", False),
+    # (observed) The SaaS gateway re-encodes numbers as JavaScript numbers:
+    # floating points come in its form (3, 1e+300), not BigFix's (3.0,
+    # 1.0e+300), and integers above 2**53 lose precision. The gateway's text
+    # is kept as sent; nothing here can recover the server's.
+    "floating_point_plural": (("1.5", "-2.25", "3"), "floating point", True),
+    "floating_point_small": (("0.000001234",), "floating point", False),
+    "floating_point_large": (("1e+300",), "floating point", False),
+    "big_integer": ((9223372036854776000,), "integer", False),
+    "tuple_mixed": (
+        (("Sat, 17 Oct 2026", "1.5", "1.2"),),
+        "( date, floating point, version )",
+        False,
+    ),
 }
 
 
@@ -457,6 +483,19 @@ async def test_rejected_login_is_shared_and_never_resent() -> None:
     for result in results:
         assert result.error is not None
         assert (result.error.kind, result.error.code) == ("authentication", "login_failed")
+
+
+async def test_differently_cased_emails_are_one_account() -> None:
+    # (observed) BigFix SaaS signs in the same account whatever the email's
+    # case, so a rejection under one casing must stop the others too.
+    account, pool = Account(_auth_fail()), SaasSessionPool()
+    emails = ("operator@example.com", "Operator@Example.com", "OPERATOR@EXAMPLE.COM")
+    backends = [_pooled(pool, account, email=e) for e in emails]
+    results = await asyncio.gather(*(b.evaluate("1") for b in backends))
+    for b in backends:
+        await b.aclose()
+    assert account.paths == Counter({"/auth/v1/user/login": 1})
+    assert all(r.error is not None and r.error.code == "login_failed" for r in results)
 
 
 async def test_totp_is_asked_once_for_the_account() -> None:

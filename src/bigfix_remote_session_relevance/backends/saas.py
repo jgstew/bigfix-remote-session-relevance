@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import re
 import time
 import uuid
@@ -48,6 +47,7 @@ import httpx
 
 from ..result import ResultError, SessionRelevanceResult
 from ..server_address import saas_api_address
+from ..value_types import loads_json
 from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
 from .base import Backend, error_from_status
 
@@ -107,7 +107,7 @@ class SaasSession:
 
 
 class SaasSessionPool:
-    """Sessions keyed by account: API host, email and password.
+    """Sessions keyed by account: API host, email (any case) and password.
 
     `AsyncSessionRelevanceClient` owns one and attaches every SaaS backend it
     builds. The password is part of the key (as a digest), so a connection
@@ -148,7 +148,9 @@ class SaasBackend(Backend):
 
     def _account_key(self) -> tuple[str, str, str]:
         password = hashlib.sha256((self._password or "").encode()).hexdigest()
-        return (self.address.base_url, self.username or "", password)
+        # (observed) The service signs in the same account whatever the
+        # email's case, so casings share one session and one cached failure.
+        return (self.address.base_url, (self.username or "").lower(), password)
 
     @classmethod
     def _config_kwargs(
@@ -344,7 +346,7 @@ def parse_saas_session_relevance(
             )
         return _format_error(session_relevance, raw, backend, "expected JSON from BigFix SaaS")
     try:
-        body = json.loads(raw.text)
+        body = loads_json(raw.text)
     except ValueError as exc:
         return _format_error(session_relevance, raw, backend, f"invalid JSON: {exc}")
     data = body.get("data") if isinstance(body, dict) else None

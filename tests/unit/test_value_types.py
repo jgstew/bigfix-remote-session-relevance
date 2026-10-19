@@ -79,3 +79,20 @@ def test_coerce(value: Any, type_node: Any, expected: Any) -> None:
 )
 def test_answer_string(value: object, expected: str) -> None:
     assert answer_string(value) == expected
+
+
+def test_json_number_keeps_the_server_text_and_stays_a_float() -> None:
+    import copy
+    import json
+    import pickle
+
+    from bigfix_remote_session_relevance.value_types import JsonNumber, loads_json
+
+    small, large, whole = loads_json("[0.000001234, 1.0e+300, 3.0]")
+    assert (str(small), str(large), str(whole)) == ("0.000001234", "1.0e+300", "3.0")
+    assert small == 0.000001234 and isinstance(small, float)
+    assert loads_json("[7]") == [7] and type(loads_json("[7]")[0]) is int
+    for clone in (copy.copy(small), copy.deepcopy(small), pickle.loads(pickle.dumps(small))):  # noqa: S301 (own data)
+        assert isinstance(clone, JsonNumber) and str(clone) == "0.000001234"
+    assert json.loads(json.dumps([small])) == [0.000001234]
+    assert coerce(small, "floating point") == "0.000001234"
