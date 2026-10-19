@@ -377,3 +377,16 @@ def test_streamed_output_waits_while_a_prompt_holds_the_terminal(
         assert capsys.readouterr().out == ""
     worker.join(2)
     assert capsys.readouterr().out == "1\n"
+
+
+def test_keep_escapes(config_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    routes = {
+        "dev-root": httpx.Response(
+            200, json={"result": ["a\tb"], "plural": False, "type": "string"}
+        ),
+        "dev-wr": _wr("<String>a%09b</String>"),
+    }
+    assert _run(["--json", "q"], routes) == 0
+    assert {r["answers"][0] for r in json.loads(capsys.readouterr().out)} == {"a\tb"}
+    assert _run(["--json", "--keep-escapes", "q"], routes) == 0
+    assert {r["answers"][0] for r in json.loads(capsys.readouterr().out)} == {"a%09b"}

@@ -34,6 +34,7 @@ from .config import (
     set_deployment_id,
 )
 from .deployment import discover_deployment_id, group_key
+from .escapes import escape_result
 from .exceptions import ConfigError
 from .result import ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
@@ -148,27 +149,40 @@ class AsyncSessionRelevanceClient:
 
     # -- public API -----------------------------------------------------------------
 
-    async def evaluate(self, session_relevance: str) -> SessionRelevanceResults:
-        """Plain session relevance on every deployment (or connection, in ``all`` mode)."""
+    async def evaluate(
+        self, session_relevance: str, *, unescape: bool = True
+    ) -> SessionRelevanceResults:
+        """Plain session relevance on every deployment (or connection, in ``all`` mode).
+
+        Answers are the text the session relevance evaluates to. With
+        ``unescape=False`` every string in them is escaped instead
+        (`escape_answer`: ``%`` and control characters as ``%xx``, Web
+        Reports' and qna's form), the same way whichever backend answered.
+        """
+        call = self._plain(session_relevance, unescape)
         return await self._collect(
-            self._stream(
-                session_relevance, self._plain(session_relevance), capable=None, streaming=False
-            )
+            self._stream(session_relevance, call, capable=None, streaming=False)
         )
 
-    def evaluate_stream(self, session_relevance: str) -> AsyncGenerator[SessionRelevanceResult]:
+    def evaluate_stream(
+        self, session_relevance: str, *, unescape: bool = True
+    ) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate`, yielding each result as it lands (completion order).
 
         Abandoning the iteration early (``break``, or ``aclose()``) cancels
         the queries still running. With ``raise_errors`` it raises at the
         first failed result.
         """
-        return self._stream(session_relevance, self._plain(session_relevance), capable=None)
+        return self._stream(
+            session_relevance, self._plain(session_relevance, unescape), capable=None
+        )
 
     async def evaluate_many(
-        self, session_relevances: Iterable[str]
+        self, session_relevances: Iterable[str], *, unescape: bool = True
     ) -> list[SessionRelevanceResults]:
-        return list(await asyncio.gather(*(self.evaluate(r) for r in session_relevances)))
+        return list(
+            await asyncio.gather(*(self.evaluate(r, unescape=unescape) for r in session_relevances))
+        )
 
     async def evaluate_explorer(
         self,
@@ -176,9 +190,10 @@ class AsyncSessionRelevanceClient:
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
+        unescape: bool = True,
     ) -> SessionRelevanceResults:
         """Additive Explorer extras, on connections that can reach Explorer only."""
-        call = self._explorer(session_relevance, keys, filters)
+        call = self._explorer(session_relevance, keys, filters, unescape)
         return await self._collect(
             self._stream(session_relevance, call, capable=supports_explorer_extras, streaming=False)
         )
@@ -189,10 +204,11 @@ class AsyncSessionRelevanceClient:
         *,
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
+        unescape: bool = True,
     ) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate_explorer`, yielding each result as it lands. Invalid
         keys or filters raise here, before anything is queried."""
-        call = self._explorer(session_relevance, keys, filters)
+        call = self._explorer(session_relevance, keys, filters, unescape)
         return self._stream(session_relevance, call, capable=supports_explorer_extras)
 
     def result_count(self) -> int | None:
@@ -340,12 +356,17 @@ class AsyncSessionRelevanceClient:
         return list(groups.items())
 
     @staticmethod
-    def _plain(session_relevance: str) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
-        return lambda backend: backend.evaluate(session_relevance)
+    def _plain(
+        session_relevance: str, unescape: bool
+    ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+        return _escaped(lambda backend: backend.evaluate(session_relevance), unescape)
 
     @staticmethod
     def _explorer(
-        session_relevance: str, keys: str | None, filters: Mapping[str, str] | None
+        session_relevance: str,
+        keys: str | None,
+        filters: Mapping[str, str] | None,
+        unescape: bool,
     ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
         explorer_body(session_relevance, keys, filters)  # validate once, up front
 
@@ -354,7 +375,7 @@ class AsyncSessionRelevanceClient:
                 session_relevance, keys=keys, filters=filters
             )
 
-        return call
+        return _escaped(call, unescape)
 
     async def _collect(
         self, stream: AsyncIterator[SessionRelevanceResult]
@@ -511,6 +532,20 @@ class AsyncSessionRelevanceClient:
             backend=first.name,
             server=first.address.base_url,
         )
+
+
+def _escaped(
+    call: Callable[[Backend], Awaitable[SessionRelevanceResult]], unescape: bool
+) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+    # Every backend returns decoded text; escaping happens here, after the
+    # backend, so unescape=False reads the same whichever backend answered.
+    if unescape:
+        return call
+
+    async def escaping(backend: Backend) -> SessionRelevanceResult:
+        return escape_result(await call(backend))
+
+    return escaping
 
 
 def _summarize(attempts: list[SessionRelevanceResult]) -> SessionRelevanceResult:

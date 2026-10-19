@@ -214,6 +214,19 @@ key.
 | `elapsed_ms` | round trip (excluded from equality) |
 | `raw` | `RawResponse(status_code, content_type, text, format)`; excluded from `repr`, equality and `to_dict()` unless `include_raw=True` |
 
+String answers are the text the session relevance evaluates to, on every
+backend (Web Reports' `%xx` escapes are decoded; see § Web Reports SOAP).
+`unescape=False` on any `evaluate*` method (CLI `--keep-escapes`) asks for
+the escaped form instead: `%` and 0x00–0x1F/0x7F as lowercase `%xx`, which is
+what Web Reports and the client's qna print, and makes control characters
+visible. The client applies `escape_answer` to every string in `answers`
+(tuple members and Explorer `keys` values included) and rebuilds
+`answer_strings`. It does this after the backend has answered, so the
+escaped form is the same whichever backend answered, and no backend's
+`evaluate()` changes. Errors and `raw` are never escaped.
+`escape_answer` and `unescape_answer` are exported; for Web Reports' text
+`escape_answer(unescape_answer(t)) == t` (checked live on 11.0.7).
+
 ### Errors
 
 Per-query failures are results, never exceptions. `raise_for_error()` (or

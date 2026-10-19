@@ -576,3 +576,60 @@ async def test_evaluate_stream_raise_errors_raises_at_the_failure() -> None:
         with pytest.raises(SessionRelevanceEvaluationError):
             async for _ in client.evaluate_stream("q"):
                 pass  # pragma: no cover
+
+
+# -- %XX escapes (issue #5) --------------------------------------------------------
+
+
+def _wr_strings(*leaves: str) -> httpx.Response:
+    body = "".join(f"<String>{leaf}</String>" for leaf in leaves)
+    return httpx.Response(
+        200,
+        headers={"content-type": "text/xml"},
+        text=(
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<soapenv:Body><GetStructuredRelevanceResultResponse xmlns="http://schemas.bigfix.com/'
+            f'Relevance"><StructuredRelevanceResult><results>{body}</results>'
+            "<plural>true</plural><type>string</type><evaltime>1</evaltime>"
+            "</StructuredRelevanceResult></GetStructuredRelevanceResultResponse>"
+            "</soapenv:Body></soapenv:Envelope>"
+        ),
+    )
+
+
+def _escape_router() -> tuple[list[ConnectionConfig], Router]:
+    conns = [_conn("r", "rest", D1), _conn("e", "explorer", D1), _conn("w", "webreports", D1)]
+    decoded = httpx.Response(
+        200, json={"result": ["a%b", "x\ny"], "plural": True, "type": "string"}
+    )
+    return conns, Router({"r": [decoded], "e": [decoded], "w": [_wr_strings("a%25b", "x%0ay")]})
+
+
+async def test_answers_are_decoded_on_every_backend_by_default() -> None:
+    conns, router = _escape_router()
+    async with _client(conns, router, mode="all") as client:
+        results = await client.evaluate("q")
+    assert [r.answers for r in results] == [("a%b", "x\ny")] * 3
+
+
+async def test_keep_escapes_agrees_on_every_backend() -> None:
+    conns, router = _escape_router()
+    async with _client(conns, router, mode="all") as client:
+        results = await client.evaluate("q", unescape=False)
+        streamed = [r async for r in client.evaluate_stream("q", unescape=False)]
+        (many,) = await client.evaluate_many(["q"], unescape=False)
+    for batch in (list(results), streamed, list(many)):
+        assert sorted(str(r.connection) for r in batch) == ["e", "r", "w"]
+        assert {r.answers for r in batch} == {("a%25b", "x%0ay")}
+        assert {r.answer_strings for r in batch} == {("a%25b", "x%0ay")}
+
+
+async def test_keep_escapes_on_explorer_extras() -> None:
+    conns = [_conn("e", "explorer", D1)]
+    decoded = httpx.Response(200, json={"result": ["a\tb"], "plural": True, "type": "string"})
+    async with _client(conns, Router({"e": [decoded]})) as client:
+        results = await client.evaluate_explorer("q", keys="name", unescape=False)
+        streamed = [
+            r async for r in client.evaluate_explorer_stream("q", keys="name", unescape=False)
+        ]
+    assert results[0].answers == streamed[0].answers == ("a%09b",)
