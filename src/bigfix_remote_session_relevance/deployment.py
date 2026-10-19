@@ -17,6 +17,12 @@ from .backends.base import Backend
 DEPLOYMENT_ID_SESSION_RELEVANCE = "sha256 of gather url of bes license"
 GATHER_URL_RELEVANCE = "gather url of bes license"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_DEPLOYMENT_ID = re.compile(r"(?:multi:)?[0-9a-f]{64}")
+
+
+def is_deployment_id(value: object) -> bool:
+    """The shape `deployment_id_from_hashes` produces: a SHA-256 or a ``multi:`` one."""
+    return isinstance(value, str) and _DEPLOYMENT_ID.fullmatch(value) is not None
 
 
 def deployment_id_from_hashes(hashes: Iterable[str]) -> str | None:

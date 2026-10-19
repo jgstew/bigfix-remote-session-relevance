@@ -26,6 +26,7 @@ import tomlkit.exceptions
 from tomlkit.items import AoT
 
 from . import local_root_server
+from .deployment import is_deployment_id
 from .exceptions import ConfigError
 from .local_root_server import LOCAL_ROOT_SERVER
 from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
@@ -356,7 +357,8 @@ def _cached_local_deployment_id(server: str) -> str | None:
         same = normalize_server(str(data.get("server")), "rest") == normalize_server(server, "rest")
     except ConfigError:
         return None
-    return deployment_id if same and isinstance(deployment_id, str) else None
+    # Versions before 0.6.2 cached whatever the server answered.
+    return deployment_id if same and is_deployment_id(deployment_id) else None
 
 
 def record_local_deployment_id(server: str, deployment_id: str) -> None:

@@ -307,12 +307,18 @@ server's text.
   This is display only: `answers`, `answer_strings`, `--json` and `--raw`
   are never changed, and neither is any backend's `evaluate()`.
   Other server text is escaped too, terminal or not, since it is only ever
-  read by a person: setup-wizard probe messages, and `--show-config` cells
-  (a deployment id cached before ids were checked). The CLI switches
-  stdout/stderr from `errors="strict"` to `"backslashreplace"`, so an answer
-  the encoding can't hold (a lone surrogate from a JSON `\ud800`, or text a
-  non-UTF-8 console can't show) prints as `\uXXXX` instead of ending the run.
-  An error handler set through `PYTHONIOENCODING` is kept.
+  read by a person: setup-wizard probe messages, and the deployment ids that
+  `--show-config` and `--discover-deployments` print (one configured or
+  cached before ids were checked can hold server text). A cached local root
+  server id that isn't id-shaped is ignored, and BigFix SaaS server ids
+  (`sid`) that aren't plain names (`[0-9A-Za-z_-]+`) are skipped. The CLI
+  switches stdout/stderr to `errors="backslashreplace"` unless their handler
+  can't fail (`replace`, `ignore`, `xmlcharrefreplace`, `namereplace`), so an
+  answer the encoding can't hold (a lone surrogate from a JSON `\ud800`, or
+  text a non-UTF-8 console can't show) prints as `\uXXXX` instead of ending
+  the run. `strict` and `surrogateescape` (CPython's default in UTF-8 mode
+  and the C locale, which refuses `\ud800` too) are both replaced, even when
+  set through `PYTHONIOENCODING`.
 
 ## TLS: trust on first use
 

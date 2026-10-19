@@ -517,3 +517,17 @@ async def test_backend_outside_a_pool_keeps_its_own_session() -> None:
     ]
     await asyncio.gather(*(b.evaluate("1") for b in backends))
     assert account.paths["/auth/v1/user/login"] == 2
+
+
+async def test_servers_from_login_skip_ids_that_are_not_plain_names(
+    recording_transport: type,
+) -> None:
+    # A sid is printed by --setup and becomes part of a connection name.
+    body = LOGIN_OK_BODY.replace('"160001489":', '"160001489":{},"\\u001b]0;x\\u0007":')
+    login = _login_ok()
+    rec = recording_transport(
+        [httpx.Response(200, text=body, headers=login.headers), _captured("singular_integer")]
+    )
+    async with _backend(rec) as backend:
+        await backend.evaluate("1")
+        assert backend.servers == ("bf160001489",)

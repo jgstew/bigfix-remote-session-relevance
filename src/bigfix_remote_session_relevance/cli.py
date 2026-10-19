@@ -271,16 +271,28 @@ def _print_stream(
     return SessionRelevanceResults(collected)
 
 
+# Error handlers that write every character somehow; anything else (strict,
+# surrogateescape) can raise on an answer.
+_NEVER_FAILING_ERRORS = frozenset(
+    {"backslashreplace", "replace", "ignore", "xmlcharrefreplace", "namereplace"}
+)
+
+
 def _tolerate_unencodable(stream: TextIO) -> None:
     """Write what the stream's encoding can't hold as ``\\uXXXX``, not raise.
 
     Answers can hold text no encoding can: JSON allows a lone surrogate
     (``\\ud800``), which UTF-8 refuses, and a non-UTF-8 console refuses much
-    more. Strict errors would end the run mid-stream on one answer. An error
-    handler the user chose (``PYTHONIOENCODING``) is kept.
+    more. A failing handler would end the run mid-stream on one answer. That
+    includes ``surrogateescape``, CPython's stdout default in UTF-8 mode and
+    the C locale, which only covers \\udc80-\\udcff. A handler that can't fail
+    is kept. The change is to the process's stream, as fits the entry point.
     """
-    if getattr(stream, "errors", None) == "strict" and isinstance(stream, io.TextIOWrapper):
-        stream.reconfigure(errors="backslashreplace")
+    try:
+        if isinstance(stream, io.TextIOWrapper) and stream.errors not in _NEVER_FAILING_ERRORS:
+            stream.reconfigure(errors="backslashreplace")
+    except (ValueError, OSError):  # closed or detached; a flush that failed
+        pass
 
 
 def _stderr_input(prompt: str) -> str:
@@ -453,7 +465,9 @@ def _discover(config: Config, client_kwargs: dict[str, Any]) -> int:
     with SessionRelevanceClient(config, **client_kwargs) as client:
         found = client.discover_deployments(force=True)
     for name, deployment_id in found.items():
-        print(f"{name}: {deployment_id or '(not discovered)'}")
+        # An id configured or cached before ids were checked can hold server text.
+        shown = escape_controls(deployment_id) if deployment_id else "(not discovered)"
+        print(f"{name}: {shown}")
     return 0 if any(found.values()) else 2
 
 

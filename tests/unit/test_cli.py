@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import threading
@@ -507,3 +508,45 @@ def test_lone_surrogate_in_an_answer_does_not_crash_the_output(
     assert capsys.readouterr().out == "a\\ud800b\n"
     assert _run(["--connection", "dev-root", "--json", "q"], routes) == 0
     assert json.loads(capsys.readouterr().out)[0]["answers"] == ["a\ud800b"]
+
+
+def test_discover_deployments_escapes_an_id_cached_before_ids_were_checked(
+    config_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_path.write_text(CONFIG.replace(D1, "\\u001b]0;pwned\\u0007"))
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    routes = {
+        "dev-root": httpx.ConnectError("refused"),
+        "dev-wr": _wr(f"<String>{'a' * 64}</String>"),
+    }
+    _run(["--discover-deployments"], routes)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+    assert "dev-root: %1b]0;pwned%07" in out
+
+
+@pytest.mark.parametrize("errors", ["strict", "surrogateescape"])
+def test_tolerate_unencodable_covers_every_handler_that_can_fail(errors: str) -> None:
+    # surrogateescape is CPython's stdout default in UTF-8 mode and the C
+    # locale, and it refuses \ud800 just as strict does.
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors=errors)
+    cli._tolerate_unencodable(stream)
+    stream.write("a\ud800b")
+    stream.flush()
+    assert stream.buffer.getvalue() == b"a\\ud800b"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("errors", ["replace", "xmlcharrefreplace"])
+def test_tolerate_unencodable_keeps_a_handler_that_cannot_fail(errors: str) -> None:
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors=errors)
+    cli._tolerate_unencodable(stream)
+    assert stream.errors == errors
+
+
+def test_tolerate_unencodable_ignores_closed_or_detached_streams() -> None:
+    closed = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    closed.close()
+    cli._tolerate_unencodable(closed)
+    detached = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    detached.detach()
+    cli._tolerate_unencodable(detached)
