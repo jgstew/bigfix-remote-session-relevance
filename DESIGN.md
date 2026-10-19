@@ -224,7 +224,7 @@ key.
 | Field | Meaning |
 |---|---|
 | `session_relevance` | the query |
-| `answers` | native values, coerced by `type`: `integer`→`int`, `boolean`→`bool`, tuples→`tuple`, otherwise `str` (a `floating point` is the server's text, e.g. `"0.000001234"`, never re-formatted by Python); `dict` only from Explorer `keys` |
+| `answers` | native values, coerced by `type`: `integer`→`int`, `boolean`→`bool`, tuples→`tuple`, otherwise `str` (a `floating point` is the server's text, e.g. `"0.000001234"`, never re-formatted by Python; a number with no type to coerce it, e.g. in an Explorer `keys` dict, stays a `float`); `dict` only from Explorer `keys` |
 | `answer_strings` | BigFix-style strings; tuples joined with `", "` |
 | `type`, `plural`, `evaluation_time_ms` | as reported by the server (`None` if unknown) |
 | `error` | `ResultError` or `None` |

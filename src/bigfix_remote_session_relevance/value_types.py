@@ -28,8 +28,9 @@ class JsonNumber(float):
     The REST API and Explorer send floating points as JSON numbers whose
     text is what Web Reports sends as text (``0.000001234``, ``1.0e+300``);
     ``str(float)`` would give ``1.234e-06`` and ``1e+300``. ``str()`` of this
-    is the server's text, so ``answers`` agree across backends; it is still
-    a ``float`` for arithmetic, equality and ``json.dumps``.
+    (and so a floating-point answer) is the server's text, so ``answers``
+    agree across backends. It is still a ``float``: arithmetic and equality
+    are a float's, and ``repr()`` / ``json.dumps`` give Python's form.
     """
 
     text: str

@@ -190,10 +190,14 @@ SUCCESS = {
     # floating points come in its form (3, 1e+300), not BigFix's (3.0,
     # 1.0e+300), and integers above 2**53 lose precision. The gateway's text
     # is kept as sent; nothing here can recover the server's.
+    "floating_point": (("1.5",), "floating point", False),
     "floating_point_plural": (("1.5", "-2.25", "3"), "floating point", True),
+    "floating_point_tiny": (("1e-7",), "floating point", False),  # BigFix: 0.0000001
+    "floating_point_rounding": (("0.3",), "floating point", False),  # BigFix: 0.30000000000000
     "floating_point_small": (("0.000001234",), "floating point", False),
     "floating_point_large": (("1e+300",), "floating point", False),
     "big_integer": ((9223372036854776000,), "integer", False),
+    "integer_above_2_53": ((9007199254740992,), "integer", False),  # sent: 9007199254740993
     "tuple_mixed": (
         (("Sat, 17 Oct 2026", "1.5", "1.2"),),
         "( date, floating point, version )",

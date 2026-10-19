@@ -97,11 +97,27 @@ TYPED = {
 }
 
 
-@pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
-@pytest.mark.parametrize("key", sorted(TYPED))
+# Captured later, with Explorer reachable again: REST only via Explorer. The
+# SaaS gateway's forms of these are pinned in test_backend_saas.py.
+TYPED_WITH_EXPLORER = {
+    "floating_point_tiny": (("0.0000001",), "floating point", False),
+    "floating_point_rounding": (("0.30000000000000",), "floating point", False),
+    "integer_above_2_53": ((9007199254740993,), "integer", False),
+}
+_TYPED_CASES = [(s, i, k) for s, i in zip(SOURCES, SOURCE_IDS, strict=True) for k in TYPED] + [
+    (s, i, k)
+    for s, i in zip(SOURCES, SOURCE_IDS, strict=True)
+    if s != ("rest", "")
+    for k in TYPED_WITH_EXPLORER
+]
+
+
+@pytest.mark.parametrize(
+    ("source", "key"), [pytest.param(s, k, id=f"{k}-{i}") for s, i, k in _TYPED_CASES]
+)
 async def test_typed_cases(source: tuple[str, str], key: str, recording_transport: type) -> None:
     result = await _from_source(source, key, recording_transport)
-    answers, type_, plural = TYPED[key]
+    answers, type_, plural = {**TYPED, **TYPED_WITH_EXPLORER}[key]
     assert result.ok, result.error
     assert (result.answers, result.type, result.plural) == (answers, type_, plural)
     assert result.answer_strings == tuple(

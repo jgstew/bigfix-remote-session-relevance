@@ -54,7 +54,10 @@ CASES: list[tuple[str, tuple[Any, ...], str | None, bool | None]] = [
 
 # Numbers keep the server's text. The SaaS gateway re-encodes numbers as
 # JavaScript numbers, so it has its own expectations (DESIGN.md § BigFix SaaS).
-FLOATS = '("1.5" as floating point; "0.000001234" as floating point; "1e300" as floating point; "3" as floating point)'
+FLOATS = (
+    '("1.5" as floating point; "0.000001234" as floating point; '
+    '"1e300" as floating point; "3" as floating point)'
+)
 NUMBER_CASES: dict[str, list[tuple[str, tuple[Any, ...], str | None, bool | None]]] = {
     "on_prem": [
         (FLOATS, ("1.5", "0.000001234", "1.0e+300", "3.0"), "floating point", True),
