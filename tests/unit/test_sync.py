@@ -197,10 +197,53 @@ def test_unclosed_client_does_not_hang_interpreter_exit(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
+def _new_threads(before: set[threading.Thread]) -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t not in before]
+
+
 def test_garbage_collected_client_stops_its_loop_thread() -> None:
+    before = set(threading.enumerate())
     client = SessionRelevanceClient(_config(), **KW)
     assert client.evaluate("q").ok
-    loop_threads = [t for t in threading.enumerate() if t.name == "SessionRelevanceClient"]
+    loop_threads = _new_threads(before)
+    assert len(loop_threads) == 1
     del client
     gc.collect()
-    assert not any(t.is_alive() for t in loop_threads)
+    assert not loop_threads[0].is_alive()
+
+
+def test_client_dropped_on_its_own_loop_thread_still_shuts_down() -> None:
+    # The finalizer can't wait on the thread it runs on; the shutdown must
+    # still happen rather than leak the loop.
+    before = set(threading.enumerate())
+    client = SessionRelevanceClient(_config(), **KW)
+    (loop_thread,) = _new_threads(before)
+    portal = client._portal
+    assert portal is not None
+    finalizer = client._finalizer
+    portal.call(finalizer)
+    loop_thread.join(5)
+    assert not loop_thread.is_alive()
+
+
+def test_close_cancels_an_in_flight_stream() -> None:
+    def factory(conn: ConnectionConfig) -> httpx.AsyncBaseTransport:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if conn.name == "a":
+                await anyio.sleep(30)
+            return httpx.Response(200, json={"result": [1], "plural": False})
+
+        return httpx.MockTransport(handler)
+
+    client = SessionRelevanceClient(_two_deployments(), transport_factory=factory, trust=None)
+    stream = client.evaluate_stream("q")
+    assert next(stream).connection == "b"
+    started = time.monotonic()
+    client.close()
+    assert time.monotonic() - started < 5
+
+
+def test_stream_keeps_an_otherwise_unreferenced_client_alive() -> None:
+    stream = SessionRelevanceClient(_config(), **KW).evaluate_stream("q")
+    gc.collect()
+    assert [r.answers for r in stream] == [(42,)]

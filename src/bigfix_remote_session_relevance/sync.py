@@ -5,12 +5,12 @@ anyio blocking portal), so the sync API also works when the caller is
 already inside a running loop, such as a notebook or an async web app,
 where ``asyncio.run`` would fail.
 
-That thread is a daemon the client owns, not ``start_blocking_portal``'s
-executor thread: interpreter shutdown joins non-daemon threads before
-running atexit hooks, so a client that was never closed (a long-lived
-server just exits) would wait forever on a loop nobody stops. A
-``weakref.finalize`` (an atexit hook, run while daemon threads still
-run) closes such a client cleanly instead.
+The client owns that thread rather than using ``start_blocking_portal``:
+a client that was never closed (a long-lived server just exits) left
+that context manager to be finalized during interpreter teardown, after
+daemon threads have stopped, and its ``portal.call(portal.stop)`` waited
+forever. A ``weakref.finalize`` runs as an atexit hook, while the loop
+thread still runs, so it closes such a client cleanly instead.
 
 The ``*_stream`` methods hand each result to the calling thread through a
 queue the moment the loop thread receives it.
@@ -114,10 +114,12 @@ class SessionRelevanceClient:
             raise RuntimeError("SessionRelevanceClient is closed")
         return self._drain(self._portal, functools.partial(stream, *args, **kwargs))
 
-    @staticmethod
-    def _drain(portal: BlockingPortal, stream: Callable[[], AsyncGenerator[T]]) -> Iterator[T]:
+    def _drain(
+        self, portal: BlockingPortal, stream: Callable[[], AsyncGenerator[T]]
+    ) -> Iterator[T]:
         # A generator, so nothing starts until the first next(): an iterator
-        # that is created and dropped never queries anything.
+        # that is created and dropped never queries anything. Its frame holds
+        # self, so an unreferenced client isn't finalized mid-stream.
         items: queue.Queue[tuple[str, Any]] = queue.Queue()
 
         async def pump() -> None:
@@ -195,13 +197,16 @@ def _shut_down(
 ) -> None:
     if threading.current_thread() is thread:
         # Garbage collected on its own loop thread, which can't wait on
-        # itself; the daemon thread is abandoned rather than deadlocked.
+        # itself: shut down from a helper thread instead.
+        threading.Thread(target=_shut_down, args=(portal, thread, client), daemon=True).start()
         return
     try:
         if client is not None:
             portal.call(client.aclose)
     finally:
-        portal.call(portal.stop)
+        # Cancel what's still running (an abandoned stream's queries) rather
+        # than wait up to a read timeout for it.
+        portal.call(portal.stop, True)
         thread.join()
 
 
