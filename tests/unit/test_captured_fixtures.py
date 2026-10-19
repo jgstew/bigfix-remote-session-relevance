@@ -304,13 +304,12 @@ async def test_extras_filter_that_is_not_a_set(backend: str, recording_transport
     assert result.error.message.startswith('Filter "computers":')
 
 
-# Issue #5: Web Reports keeps qna-style %xx escapes in answer text; REST and
-# Explorer send it decoded. REST is captured with Explorer reachable only.
-ESCAPE_SOURCES = [("rest", "via_explorer__"), ("webreports", ""), ("explorer", "")]
+# Issue #5: Web Reports keeps qna-style %xx escapes in answer text; REST (with
+# and without a reachable Explorer) and Explorer send it decoded.
 ESCAPED_STRINGS = ("a%b", "a%41", "x\ny", "a\tb", "a\x01b", "a\x7fb")
 
 
-@pytest.mark.parametrize("source", ESCAPE_SOURCES, ids=lambda s: s[1] + s[0])
+@pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
 async def test_escape_probes_decode_on_every_backend(
     source: tuple[str, str], recording_transport: type
 ) -> None:
@@ -326,7 +325,7 @@ async def test_escape_probes_decode_on_every_backend(
     assert "a%b\tc" in error.error.detail
 
 
-@pytest.mark.parametrize("source", ESCAPE_SOURCES, ids=lambda s: s[1] + s[0])
+@pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
 async def test_escape_result_gives_web_reports_text_on_every_backend(
     source: tuple[str, str], recording_transport: type
 ) -> None:
