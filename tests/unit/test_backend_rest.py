@@ -285,30 +285,36 @@ async def test_genuine_disallowed_character_error_is_kept(recording_transport: t
     assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"
 
 
-# What the root server answers when Explorer is back and the form value is
-# itself valid JSON (seen live 2026-10-18 for "hello", 1, true and "a%09b").
-INVALID_JSON_BODY = "Invalid JSON: expected type: object"
+# What the root server answers once Explorer is back when the percent-quoted
+# form value is still valid JSON (1, true, 1.5; captured live, issue #6).
+# String literals become %22...%22 and get "not allowed" instead.
+INVALID_JSON_CAPTURE = Path(__file__).parent.parent / "fixtures/rest/captured"
+INVALID_JSON_MESSAGE = 'Invalid JSON: Invalid required value type, expected type: "object"'
 
 
 def _invalid_json() -> httpx.Response:
-    return httpx.Response(400, text=INVALID_JSON_BODY, headers={"content-type": "text/plain"})
+    meta = json.loads(
+        (INVALID_JSON_CAPTURE / "via_explorer__form_invalid_json.meta.json").read_text()
+    )
+    body = (INVALID_JSON_CAPTURE / "via_explorer__form_invalid_json.body").read_text()
+    return httpx.Response(meta["status"], text=body)
 
 
 async def test_explorer_returning_during_fallback_detected_on_invalid_json(
     recording_transport: type,
 ) -> None:
-    # JSON-shaped relevance does not fail with "not allowed" once Explorer is
-    # back; the form value parses as JSON and the server answers 400 "Invalid
-    # JSON". That must trigger the JSON retry too, and end the fallback.
-    ok = httpx.Response(200, json={"result": ["hello"], "plural": False, "type": "string"})
+    # Relevance like 1 or true does not fail with "not allowed" once Explorer
+    # is back; the form value parses as JSON and the server answers 400
+    # "Invalid JSON". That must trigger the JSON retry too, and end the fallback.
+    ok = httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
     rec = recording_transport([NO_EXPLORER, ok, _invalid_json(), ok, ok])
     async with _backend(rec) as backend:
-        await backend.evaluate('"hello"')  # JSON 503 -> form: fallback starts
-        result = await backend.evaluate('"hello"')  # form 400 -> JSON retry succeeds
+        await backend.evaluate("1")  # JSON 503 -> form: fallback starts
+        result = await backend.evaluate("1")  # form 400 -> JSON retry succeeds
         assert backend._form_until == 0.0
-        await backend.evaluate('"hello"')  # back on JSON
+        await backend.evaluate("1")  # back on JSON
     assert result.ok
-    assert result.answers == ("hello",)
+    assert result.answers == (1,)
     assert [r.headers["content-type"] for r in rec.requests] == [
         "application/json+relevance",
         "application/x-www-form-urlencoded",
@@ -327,10 +333,10 @@ async def test_invalid_json_error_kept_when_explorer_still_down(
     rec = recording_transport([NO_EXPLORER, ok, _invalid_json(), NO_EXPLORER, ok])
     async with _backend(rec) as backend:
         await backend.evaluate("1")
-        result = await backend.evaluate('"hello"')
+        result = await backend.evaluate("true")
         assert backend._form_until > 0.0
         await backend.evaluate("1")
     assert result.error is not None
     assert result.error.http_status == 400
-    assert result.error.message == INVALID_JSON_BODY
+    assert result.error.message == INVALID_JSON_MESSAGE
     assert rec.requests[-1].headers["content-type"] == "application/x-www-form-urlencoded"

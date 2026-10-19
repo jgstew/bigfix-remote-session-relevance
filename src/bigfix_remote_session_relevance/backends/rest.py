@@ -20,9 +20,10 @@ server without Explorer does not pay an extra round trip on every query
 (each one already costs ~3 s there: the root server waits for Explorer
 before answering itself). If Explorer comes back during that window, the
 form starts failing with "character which is not allowed", or with 400
-"Invalid JSON" for relevance that is itself valid JSON (``"hello"``, ``1``,
-``true``); either error triggers one JSON retry, which either answers or
-confirms Explorer is down.
+"Invalid JSON" when the percent-quoted value is still valid JSON (``1``,
+``true``, ``1.5``; string literals become ``%22...`` and get the first error);
+either error triggers one JSON retry, which either answers or confirms
+Explorer is down.
 """
 
 from __future__ import annotations
