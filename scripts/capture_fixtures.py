@@ -53,6 +53,10 @@ QUERIES = {
     "error_type": '1 + "a"',
     "deployment_id": "sha256 of gather url of bes license",
     "gather_url_hash_check": "gather url of bes license",
+    # Web Reports keeps qna-style %xx escapes in answer text (issue #5).
+    "escaped_strings": '("a%25b"; "a%2541"; "x%0Ay"; "a%09b"; "a%01b"; "a%7Fb")',
+    "escaped_tuple": '("a%25b", 1)',
+    "error_escaped": 'error "a%25b%09c"',
 }
 REDACTED_GATHER = "http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite"
 _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")

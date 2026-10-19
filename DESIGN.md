@@ -83,6 +83,13 @@ field differ.
   (`2026-10-17T17:09:32-04:00`) and is converted to the BigFix format the
   other backends return (`Sat, 17 Oct 2026 17:09:32 -0400`), locale
   independently. `evaltime` is in milliseconds (matches REST `evaltime_ms`).
+- **(observed, 11.0.7)** Answer text keeps the client qna's escapes, with both
+  SOAP methods: `%` is `%25` and 0x00–0x1F and 0x7F are `%xx` in lowercase
+  hex (`"a%25b"` → `a%25b`, `"a%09b"` → `a%09b`). Space, `,`, `;`, `"` and
+  everything ≥ 0x80 are sent as is. REST and Explorer send the text itself,
+  so every text leaf is decoded (`escapes.unescape_answer`, one pass:
+  `a%2541` → `a%41`). Error text is not escaped (`error "a%25b%09c"` faults
+  with `a%b c`) and is left alone; `raw` stays as sent.
 - **(observed)** The WSDL advertises `/soap` as the address; `/webreports/soap`
   (the documented path) works too.
 - http:// is allowed (some Web Reports run plain http) but logged once per
@@ -206,6 +213,26 @@ key.
 | `connection`, `deployment_id`, `backend`, `server` | where it came from (no credentials) |
 | `elapsed_ms` | round trip (excluded from equality) |
 | `raw` | `RawResponse(status_code, content_type, text, format)`; excluded from `repr`, equality and `to_dict()` unless `include_raw=True` |
+
+String answers are the text the session relevance evaluates to, on every
+backend (Web Reports' `%xx` escapes are decoded; see § Web Reports SOAP).
+**(observed, 11.0.7)** REST (with and without a reachable Explorer),
+Explorer and SaaS send that text already decoded (captures `escaped_*`;
+SaaS checked live).
+`unescape=False` on any `evaluate*` method (CLI `--keep-escapes`) asks for
+the escaped form instead: `%` and 0x00–0x1F/0x7F as lowercase `%xx`, which is
+what Web Reports and the client's qna print, and makes control characters
+visible. The client applies `escape_answer` to every string in `answers`
+(tuple members and Explorer `keys` values included) and rebuilds
+`answer_strings`. It does this after the backend has answered, so the
+escaped form is the same whichever backend answered, and no backend's
+`evaluate()` changes. Errors and `raw` are never escaped.
+`escape_answer`, `unescape_answer` and `escape_result` (the same step for a
+`SessionRelevanceResult` from a backend used directly) are exported. For Web
+Reports' text `escape_answer(unescape_answer(t)) == t`, checked live on
+11.0.7 for every character class the issue #5 probes cover. `unescape_answer`
+decodes any `%XX`, not only the characters Web Reports escapes, so it is not
+meant for arbitrary text.
 
 ### Errors
 

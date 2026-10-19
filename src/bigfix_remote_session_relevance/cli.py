@@ -101,6 +101,11 @@ def build_parser() -> argparse.ArgumentParser:
     out = p.add_argument_group("output")
     out.add_argument("--json", action="store_true", help="JSON list of result objects")
     out.add_argument("--raw", action="store_true", help="include the raw server response")
+    out.add_argument(
+        "--keep-escapes",
+        action="store_true",
+        help="show %% and control characters in answers as %%xx (as Web Reports sends them)",
+    )
     out.add_argument("-v", "--verbose", action="count", default=0)
 
     net = p.add_argument_group("network")
@@ -189,22 +194,25 @@ def main(
             except (ValueError, TypeError) as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return EXIT_USAGE
+        unescape = not args.keep_escapes
         with SessionRelevanceClient(config, **client_kwargs) as client:
             if args.json:
                 # One JSON document needs every result in; it alone waits.
                 results = (
-                    client.evaluate_explorer(session_relevance, keys=args.keys, filters=filters)
+                    client.evaluate_explorer(
+                        session_relevance, keys=args.keys, filters=filters, unescape=unescape
+                    )
                     if explorer
-                    else client.evaluate(session_relevance)
+                    else client.evaluate(session_relevance, unescape=unescape)
                 )
                 print(json.dumps(results.to_dict(include_raw=args.raw), indent=2))
             else:
                 stream = (
                     client.evaluate_explorer_stream(
-                        session_relevance, keys=args.keys, filters=filters
+                        session_relevance, keys=args.keys, filters=filters, unescape=unescape
                     )
                     if explorer
-                    else client.evaluate_stream(session_relevance)
+                    else client.evaluate_stream(session_relevance, unescape=unescape)
                 )
                 count = client.result_count()
                 labelled = None if count is None else count > 1

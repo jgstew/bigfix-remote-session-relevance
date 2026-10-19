@@ -76,6 +76,7 @@ bigfix-remote-session-relevance "names of bes sites"            # one answer per
 bigfix-remote-session-relevance --json "ids of bes computers"   # list of result objects
 bigfix-remote-session-relevance --all "now"                     # every connection, not one per deployment (= -all, --all-connections)
 bigfix-remote-session-relevance --backend webreports --raw "1"  # raw server response
+bigfix-remote-session-relevance --keep-escapes '"a%09b"'        # a%09b: % and control characters as %xx
 bigfix-remote-session-relevance --keys "id name" \
     "(id of it, name of it) of bes computers"                  # Explorer extras
 echo "number of bes fixlets" | bigfix-remote-session-relevance -
@@ -83,7 +84,9 @@ bigfix-remote-session-relevance --show-config                   # connections, n
 bigfix-remote-session-relevance --show-certs | --trust-cert NAME | --forget-cert HOST:PORT
 ```
 
-Answers go to stdout; errors and `-v` metadata go to stderr.
+Answers go to stdout; errors and `-v` metadata go to stderr. An answer
+containing a newline prints as several lines; `--keep-escapes` shows it as
+one (`x%0ay`), with any other control character visible too.
 
 Results stream in as each deployment answers (completion order), so a slow
 or unreachable server no longer holds up the ones that already finished.
@@ -138,6 +141,14 @@ async with AsyncSessionRelevanceClient() as client:  # default config
         "(id of it, name of it) of bes computers", keys="id name"
     )
 ```
+
+String answers are the decoded text on every backend (`"a%09b"` gives
+`a<TAB>b`). Pass `unescape=False` to any `evaluate*` method or to
+`evaluate_session_relevance()` / `async_evaluate_session_relevance()` (CLI:
+`--keep-escapes`) to get `%` and control characters as `%xx` instead
+(`a%09b`), the form Web Reports and qna print, again the same on every
+backend. `escape_answer()` / `unescape_answer()` convert between the two;
+`escape_result()` does it for a whole result from a backend used directly.
 
 `SessionRelevanceClient` has the same methods, synchronously, and works even
 inside a running event loop. Single backends (`RestBackend`,

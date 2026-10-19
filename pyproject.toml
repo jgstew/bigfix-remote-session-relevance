@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-remote-session-relevance"
-version = "0.5.2"
+version = "0.6.0"
 description = "Evaluate BigFix session relevance through the REST API, Web Reports SOAP API, or BigFix Explorer, with one common result type."
 readme = "README.md"
 license = { file = "LICENSE" }
