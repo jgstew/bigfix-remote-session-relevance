@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import gc
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -162,3 +166,41 @@ def test_abandoned_sync_stream_cancels_running_queries() -> None:
 def test_sync_explorer_stream_validates_on_call() -> None:
     with SessionRelevanceClient(_config(), **KW) as client, pytest.raises(ValueError):
         client.evaluate_explorer_stream("q", keys="id {")
+
+
+_UNCLOSED_CLIENT_SCRIPT = """
+import httpx
+from bigfix_remote_session_relevance import SessionRelevanceClient
+from bigfix_remote_session_relevance.config import Config, ConnectionConfig
+
+def factory(conn):
+    return httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"result": [42], "plural": False})
+    )
+
+config = Config(connections=(ConnectionConfig(
+    name="a", backend="rest", server="a.example.com", username="u", password="p",
+    deployment_id="1" * 64, verify=True, connect_timeout=1, read_timeout=5,
+),))
+client = SessionRelevanceClient(config, transport_factory=factory, trust=None)
+assert client.evaluate("q").ok
+# No close(): long-lived owners (e.g. an MCP server) never get to call it.
+"""
+
+
+def test_unclosed_client_does_not_hang_interpreter_exit(tmp_path: Path) -> None:
+    script = tmp_path / "unclosed.py"
+    script.write_text(_UNCLOSED_CLIENT_SCRIPT)
+    proc = subprocess.run(  # noqa: S603 - our own interpreter and script
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_garbage_collected_client_stops_its_loop_thread() -> None:
+    client = SessionRelevanceClient(_config(), **KW)
+    assert client.evaluate("q").ok
+    loop_threads = [t for t in threading.enumerate() if t.name == "SessionRelevanceClient"]
+    del client
+    gc.collect()
+    assert not any(t.is_alive() for t in loop_threads)
