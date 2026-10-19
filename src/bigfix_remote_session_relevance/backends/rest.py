@@ -7,7 +7,8 @@ it, which depends on whether a BigFix Explorer is reachable from it
 * With Explorer, the root server forwards the query to it. A JSON body sent
   as ``application/json+relevance`` is evaluated exactly. Form posts are
   decoded only once there, so besapi's double-quoting breaks every query
-  ("This expression contained a character which is not allowed."), and a
+  ("This expression contained a character which is not allowed.", or 400
+  "Invalid JSON" when the quoted value is still valid JSON), and a
   plain form value that is itself valid JSON (``123``, ``true``,
   ``"hello"``) is rejected as "Invalid JSON".
 * Without Explorer, ``application/json+relevance`` answers 503 "no reachable
@@ -19,8 +20,11 @@ back to the double-quoted form, remembering the choice for a while so a
 server without Explorer does not pay an extra round trip on every query
 (each one already costs ~3 s there: the root server waits for Explorer
 before answering itself). If Explorer comes back during that window, the
-form starts failing with "character which is not allowed"; that error
-triggers one JSON retry, which either answers or confirms Explorer is down.
+form starts failing with "character which is not allowed", or with 400
+"Invalid JSON" when the percent-quoted value is still valid JSON (``1``,
+``true``, ``1.5``; string literals become ``%22...`` and get the first error);
+either error triggers one JSON retry, which either answers or confirms
+Explorer is down.
 """
 
 from __future__ import annotations
@@ -43,7 +47,8 @@ JSON_RELEVANCE = "application/json+relevance"
 # How long to keep using the form fallback before trying Explorer again.
 EXPLORER_RECHECK_SECONDS = 300.0
 _NO_EXPLORER_RE = re.compile(r"no reachable BigFix Explorer", re.IGNORECASE)
-_DISALLOWED_RE = re.compile(r"character which is not allowed", re.IGNORECASE)
+# Form errors that can mean Explorer is back (see the module docstring).
+_RETRY_JSON_RE = re.compile(r"character which is not allowed|invalid json", re.IGNORECASE)
 
 
 def encode_session_relevance(session_relevance: str) -> str:
@@ -74,9 +79,17 @@ class RestBackend(Backend):
             data={"relevance": encode_session_relevance(session_relevance), "output": "json"},
         )
         result = parse_session_relevance_response(session_relevance, response, self.name)
-        if result.error is not None and _DISALLOWED_RE.search(result.error.message):
+        error = result.error
+        # Only the server's own answer counts: our "invalid JSON: ..." for a
+        # garbled body (response_format) says nothing about Explorer.
+        if (
+            error is not None
+            and error.kind == "session_relevance"
+            and _RETRY_JSON_RE.search(error.message)
+        ):
             # If Explorer came back during the fallback, the double-quoted form
-            # now fails every query this way. One JSON retry tells the two
+            # now fails every query: "not allowed", or 400 "Invalid JSON" when
+            # the form value is itself valid JSON. One JSON retry tells the two
             # apart: a 503 means Explorer is still down and the error is real.
             retry = await self._post_json(client, {"relevance": session_relevance})
             if not _no_explorer(retry):
