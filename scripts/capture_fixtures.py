@@ -61,8 +61,9 @@ QUERIES = {
     # 1.5, which session relevance rejects; these are real floating points.
     # The server's JSON number text is what Web Reports sends as text.
     "floating_point": '"1.5" as floating point',
-    "floating_point_plural": '("1.5" as floating point; "-2.25" as floating point; '
-    '"3" as floating point)',
+    "floating_point_plural": (
+        '("1.5" as floating point; "-2.25" as floating point; "3" as floating point)'
+    ),
     "floating_point_small": '"0.000001234" as floating point',
     "floating_point_large": '"1e300" as floating point',
     "date": 'date "17 Oct 2026"',
@@ -70,8 +71,10 @@ QUERIES = {
     "time_interval": "(now - (now - 90*minute))",
     # Three parts: a four-part version looks like an IPv4 address to redact().
     "version": '"11.0.7" as version',
-    "date_parts": "(day_of_week of it, month of it, year of it, day_of_month of it, "
-    'month_and_year of it) of date "17 Oct 2026"',
+    "date_parts": (
+        "(day_of_week of it, month of it, year of it, day_of_month of it, "
+        'month_and_year of it) of date "17 Oct 2026"'
+    ),
     "big_integer": "9223372036854775807",
     "negative_integer": "(0 - 5)",
     "empty_string": '""',
