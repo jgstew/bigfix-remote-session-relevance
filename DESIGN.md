@@ -83,7 +83,8 @@ field differ.
   `<String>`: `date`, `time of day`, `time interval`, `version`, `day of
   week`, `month`, `year`, `day of month`, `month and year` (11.0.7, 2026-10-19;
   captures `date`, `version`, `date_parts`, …). `FloatingPoint` text is the
-  same as the REST API's JSON number text (`0.000001234`, `1.0e+300`, `3.0`).
+  same as the REST API's JSON number text, with and without a reachable
+  Explorer, and Explorer's (`0.000001234`, `1.0e+300`, `3.0`).
   `DateTime` is ISO 8601
   (`2026-10-17T17:09:32-04:00`) and is converted to the BigFix format the
   other backends return (`Sat, 17 Oct 2026 17:09:32 -0400`), locale

@@ -67,13 +67,11 @@ SUCCESS = {
     "nested_tuple": (((1, (2, "x")),), "( integer, ( integer, string ) )", False),
 }
 
-# Types beyond integer/string/boolean/time, captured with Explorer reachable
-# (so REST has only its via_explorer__ form). Web Reports sends floating
-# points as <FloatingPoint> and every other type here as <String>; the REST
-# API and Explorer send floating points as JSON numbers whose text is the
-# same as Web Reports'. Only integer and boolean become Python numbers.
-TYPED_SOURCES = [s for s in SOURCES if s != ("rest", "")]
-TYPED_IDS = [i for s, i in zip(SOURCES, SOURCE_IDS, strict=True) if s != ("rest", "")]
+# Types beyond integer/string/boolean/time, on all four sources (11.0.7,
+# 2026-10-19). Web Reports sends floating points as <FloatingPoint> and every
+# other type here as <String>; the REST API (with or without Explorer) and
+# Explorer send floating points as JSON numbers whose text is the same as
+# Web Reports'. Only integer and boolean become Python numbers.
 TYPED = {
     "floating_point": (("1.5",), "floating point", False),
     "floating_point_plural": (("1.5", "-2.25", "3.0"), "floating point", True),
@@ -99,7 +97,7 @@ TYPED = {
 }
 
 
-@pytest.mark.parametrize("source", TYPED_SOURCES, ids=TYPED_IDS)
+@pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
 @pytest.mark.parametrize("key", sorted(TYPED))
 async def test_typed_cases(source: tuple[str, str], key: str, recording_transport: type) -> None:
     result = await _from_source(source, key, recording_transport)
