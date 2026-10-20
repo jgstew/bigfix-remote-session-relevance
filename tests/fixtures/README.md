@@ -24,3 +24,10 @@ wrong-password probe, since failed logins count toward a permanent lock;
 `saas/shape_login_ok.json` copies the observed login response
 *structure* with synthetic values; the real one carries the session only in
 `accessToken` / `refreshToken` cookies.
+
+`rest/captured/clientquery/` are BigFix Query (`/api/clientquery`,
+`/api/clientqueryresults`) responses from an 11.x root server, captured by
+hand (the capture script only sends session relevance). The answering
+computer is redacted to id `1000001` / `COMPUTER-1` and the server address
+to `bigfix.example.com`. The 403 permission case has no capture yet; its
+test uses a synthetic body.

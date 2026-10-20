@@ -42,6 +42,13 @@ MANY: list[Callable[..., Any]] = [
 ]
 
 
+# BigFix Query sends client relevance: the other dialect, named as such.
+CLIENT: list[Callable[..., Any]] = [
+    pkg.ClientQueryExtras.submit_client_query,
+    pkg.RestBackend.submit_client_query,
+]
+
+
 def _params(func: Callable[..., Any]) -> list[str]:
     return [p for p in inspect.signature(func).parameters if p not in ("self", "cls")]
 
@@ -58,6 +65,14 @@ def test_takes_session_relevances(func: Callable[..., Any]) -> None:
     params = _params(func)
     assert params[0] == "session_relevances"
     assert "relevances" not in params
+
+
+@pytest.mark.parametrize("func", CLIENT, ids=lambda f: f.__qualname__)
+def test_client_query_takes_client_relevance(func: Callable[..., Any]) -> None:
+    params = _params(func)
+    assert params[:2] == ["client_relevance", "computer_ids"]
+    assert "relevance" not in params
+    assert "session_relevance" not in params
 
 
 def _public_callables() -> list[Callable[..., Any]]:
@@ -108,6 +123,9 @@ PUBLIC_NAMES = [
     "BackendConnectionError",
     "BackendTimeoutError",
     "CertInfo",
+    "ClientQueryExtras",
+    "ClientQueryResponse",
+    "ClientQueryRow",
     "Config",
     "ConfigError",
     "ConnectionConfig",
@@ -136,6 +154,8 @@ PUBLIC_NAMES = [
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
+    "run_setup",
+    "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",
 ]
@@ -155,6 +175,12 @@ PROVISIONAL = {
     "CertInfo",
     "KnownCerts",
     "TrustStore",
+    # 1.1.0: for bigfix-remote-client-relevance's Fast Query (issue #15).
+    "ClientQueryExtras",
+    "ClientQueryResponse",
+    "ClientQueryRow",
+    "supports_client_query",
+    "run_setup",
 }
 
 

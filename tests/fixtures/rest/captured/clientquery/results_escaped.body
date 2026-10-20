@@ -1,0 +1,1 @@
+{"results":[{"computerID":1000001,"computerName":"COMPUTER-1","subQueryID":1,"isFailure":false,"result":"a<b&\"c\"","ResponseTime":1000}]}

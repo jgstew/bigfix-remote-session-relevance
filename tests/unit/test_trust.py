@@ -252,3 +252,43 @@ def test_known_certs_forget_and_all(tmp_path: Path) -> None:
     assert known.forget("h:1") is True
     assert known.forget("h:1") is False
     assert [p.host_port for p in KnownCerts(tmp_path / "known.toml").all()] == ["[::1]:2"]
+
+
+async def test_client_query_pins_on_first_use(tls_server, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    server = tls_server("self_a")
+    known = KnownCerts(tmp_path / "known.toml")
+    async with _backend(server.port, TrustStore(known)) as backend:
+        submitted = await backend.submit_client_query("computer name", [1])
+        fetched = await backend.client_query_results(7)
+    assert submitted.ok, submitted.error
+    assert submitted.query_id == 7
+    assert fetched.ok, fetched.error
+    assert known.get(f"127.0.0.1:{server.port}") is not None
+    assert [path for path, _ in server.requests] == [
+        "/api/clientquery",
+        "/api/clientqueryresults/7?output=json",
+    ]
+
+
+async def test_client_query_refuses_changed_cert(  # type: ignore[no-untyped-def]
+    tls_server, tmp_path: Path
+) -> None:
+    first = tls_server("self_a")
+    known = KnownCerts(tmp_path / "known.toml")
+    info_a = await fetch_server_cert("127.0.0.1", first.port)
+    impostor = tls_server("self_b")
+    known.pin(
+        CertInfo(host_port=f"127.0.0.1:{impostor.port}", sha256=info_a.sha256, pem=info_a.pem),
+        trusted_by="prompt",
+    )
+
+    def never(info: CertInfo) -> bool:
+        raise AssertionError("a changed cert must never prompt")
+
+    async with _backend(impostor.port, TrustStore(known, callback=never)) as backend:
+        submitted = await backend.submit_client_query("computer name", [1])
+        fetched = await backend.client_query_results(7)
+    for response in (submitted, fetched):
+        assert response.error is not None
+        assert (response.error.kind, response.error.code) == ("tls", "pin_mismatch")
+    assert impostor.requests == []

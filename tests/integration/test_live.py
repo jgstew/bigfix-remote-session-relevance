@@ -9,13 +9,21 @@ Pinned certs and discovered deployment ids stay in the test's tmp HOME.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from bigfix_remote_session_relevance import AsyncSessionRelevanceClient, KnownCerts, TrustStore
+from bigfix_remote_session_relevance import (
+    AsyncSessionRelevanceClient,
+    KnownCerts,
+    RestBackend,
+    TrustStore,
+)
 from bigfix_remote_session_relevance.config import load_config
 from bigfix_remote_session_relevance.deployment import (
     DEPLOYMENT_ID_SESSION_RELEVANCE,
@@ -155,3 +163,38 @@ async def test_live_deployment_id_matches_local_hash(
     for h, u in zip(hashed, urls, strict=True):
         assert h.ok and u.ok, (h.error, u.error)
         assert h.answers == tuple(hashlib.sha256(str(a).encode()).hexdigest() for a in u.answers)
+
+
+@pytest.mark.live_rest
+async def test_live_client_query_round_trip(live_config_path: Path, tmp_path: Path) -> None:
+    """BigFix Query: submit ``computer name`` to one computer and poll for its row.
+
+    Needs ``BFRSR_LIVE_CLIENT_QUERY_COMPUTER_ID`` (a computer on that
+    deployment that answers quickly); ``BFRSR_LIVE_CLIENT_QUERY_CONNECTION``
+    picks the REST connection, else the first enabled one is used.
+    """
+    computer_id = os.environ.get("BFRSR_LIVE_CLIENT_QUERY_COMPUTER_ID")
+    if not computer_id:
+        pytest.skip("set BFRSR_LIVE_CLIENT_QUERY_COMPUTER_ID to a computer that answers queries")
+    wanted = os.environ.get("BFRSR_LIVE_CLIENT_QUERY_CONNECTION")
+    conn = next(
+        c
+        for c in load_config(live_config_path).connections
+        if c.enabled and c.backend == "rest" and (wanted is None or c.name == wanted)
+    )
+    trust = TrustStore(KnownCerts(tmp_path / "known.toml"))
+    async with RestBackend.from_config(conn, trust=trust) as backend:
+        submitted = await backend.submit_client_query("computer name", [int(computer_id)])
+        assert submitted.ok, submitted.error
+        assert submitted.query_id is not None
+        deadline = time.monotonic() + 60
+        while True:
+            results = await backend.client_query_results(submitted.query_id)
+            assert results.ok, results.error
+            if results.rows or time.monotonic() > deadline:
+                break
+            await asyncio.sleep(2)
+    (row,) = results.rows
+    assert row.computer_id == int(computer_id)
+    assert not row.is_failure
+    assert row.result == row.computer_name

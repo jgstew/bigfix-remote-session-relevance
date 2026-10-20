@@ -208,6 +208,49 @@ the bigfix-saas MCP server, which makes the same choices).
   into the TLS context (`client_cert`, `client_key`,
   `client_key_password_env`) and works with or without Basic auth.
 
+### BigFix Query (ClientQuery)
+
+Opt-in and additive, like the Explorer extras: `ClientQueryExtras`
+(`backends/client_query.py`), implemented only by `RestBackend`. It sends
+**client** relevance (the parameter is `client_relevance`), so it never
+shares a code path with `evaluate()`. BigFix SaaS is left out until a
+supported SaaS client query API is confirmed.
+
+- `submit_client_query(client_relevance, computer_ids)`: `POST
+  /api/clientquery`, `Content-Type: application/xml`, body
+  `<BESAPI><ClientQuery><ApplicabilityRelevance>true</ApplicabilityRelevance><QueryText>…</QueryText><Target><ComputerID>…</ComputerID>…</Target></ClientQuery></BESAPI>`
+  built with ElementTree, so the text is XML-escaped. **(observed)** `<`, `&`
+  and `%22` reach the agent intact (`results_escaped`). No computer ids, or
+  ids that are not integers, raise: a caller bug.
+- **(observed)** The answer's `<ClientQuery Resource="http://…:52311/api/clientquery/N">`
+  is `http://` for an https request, so only `<ID>` is read (with defusedxml).
+- `client_query_results(query_id)`: `GET /api/clientqueryresults/{id}?output=json`.
+  **(observed)** The JSON comes with no Content-Type: `{"results": [{"computerID",
+  "computerName", "subQueryID", "isFailure", "result", "ResponseTime"}]}`.
+  Rows accumulate as agents report (`{"results": []}` right after submit);
+  every row so far is returned and polling is the caller's. A plural answer
+  is one row per value, all with the same computer; a failed evaluation is a
+  row with `isFailure: true` and the error text in `result`. **(observed)** An
+  empty plural answer and `""` are both one row with `result: ""`
+  (`results_empty_plural`, `results_empty_string`): the API cannot tell
+  them apart.
+- **(observed)** Computer ids outside the operator's scope are accepted
+  silently: the submit is a 200 with a query id, and those computers never
+  add a row (two of three targeted ids in the capture run, both real computers
+  in the deployment, as the operator could not see them). No row is not an
+  error, so a caller polls until its own timeout; checking the ids first with
+  session relevance (`ids of bes computers`, scoped the same way) avoids that.
+- Both run through `Backend._with_trust`, the same credential, TOFU and
+  error-mapping path as `evaluate()` (which `_run_with_trust` now wraps), and
+  return a `ClientQueryResponse` (`query_id`, `rows`, `error`, `connection`,
+  `server`, `backend`, `elapsed_ms`). A 401/403 that mentions a permission is
+  `authentication` / `permission_denied`. Any 403 notes that non-master
+  operators need "Can Submit Queries", since bad REST credentials are a 401
+  (no 403 has been captured yet; the tests use synthetic bodies). Other
+  non-200s are `http` with the server's text in the message: **(observed)**
+  `400 "cannot get results for queries not submitted by the logged user"` for
+  another operator's or an unknown id. Unparsable bodies are `response_format`.
+
 ## The result contract
 
 `SessionRelevanceResult` (frozen dataclass). The field set is pinned by
@@ -440,8 +483,9 @@ Compatibility lists what that covers and which names are provisional (the
 backend and trust classes). Tests pin the parts most easily changed by
 accident: `test_result_has_every_designed_field` (the result fields),
 `test_error_kinds_are_the_designed_set` (the error kinds and their order),
-`test_public_names.py` (`__all__` as a snapshot, the provisional set, and
-session relevance naming of every public `evaluate*` parameter), and
+`test_public_names.py` (`__all__` as a snapshot, the provisional set,
+session relevance naming of every public `evaluate*` parameter, and
+`client_relevance` for the BigFix Query methods), and
 `test_exit_codes_are_the_documented_values`. A new field, kind or error code is additive;
 renaming or removing one is a major version. `test_packaging.py` keeps the
 Python classifiers equal to the versions CI tests.
