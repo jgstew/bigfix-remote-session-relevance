@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd">
+	<ClientQuery Resource="http://bigfix.example.com:52311/api/clientquery/213">
+		<ID>213</ID>
+	</ClientQuery>
+</BESAPI>

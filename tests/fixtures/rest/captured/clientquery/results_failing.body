@@ -1,0 +1,1 @@
+{"results":[{"computerID":1000001,"computerName":"COMPUTER-1","subQueryID":1,"isFailure":true,"result":"The operator \"foo bar baz\" is not defined.","ResponseTime":1000}]}

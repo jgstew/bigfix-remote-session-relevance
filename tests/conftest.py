@@ -346,7 +346,8 @@ def tls_certs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
 
 
 class TLSServer:
-    """A threaded HTTPS server answering like the REST API's /api/query.
+    """A threaded HTTPS server answering like the REST API's /api/query,
+    /api/clientquery (query id 7) and /api/clientqueryresults (no rows yet).
 
     ``requests`` records (path, Authorization header) for every request that
     got past the TLS handshake, so tests can prove credentials never reached
@@ -365,8 +366,16 @@ class TLSServer:
             def do_POST(self) -> None:
                 length = int(self.headers.get("content-length", 0))
                 self.rfile.read(length)
+                if self.path == "/api/clientquery":
+                    self._answer(b"<BESAPI><ClientQuery><ID>7</ID></ClientQuery></BESAPI>")
+                else:
+                    self._answer(b'{"result":[1],"plural":false,"type":"integer","evaltime_ms":0}')
+
+            def do_GET(self) -> None:
+                self._answer(b'{"results":[]}')
+
+            def _answer(self, body: bytes) -> None:
                 outer.requests.append((self.path, self.headers.get("authorization")))
-                body = b'{"result":[1],"plural":false,"type":"integer","evaltime_ms":0}'
                 self.send_response(200)
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()

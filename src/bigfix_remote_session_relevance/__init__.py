@@ -13,6 +13,12 @@ JSON or XML. By default every configured deployment is queried concurrently.
 from __future__ import annotations
 
 from .backends.base import Backend
+from .backends.client_query import (
+    ClientQueryExtras,
+    ClientQueryResponse,
+    ClientQueryRow,
+    supports_client_query,
+)
 from .backends.explorer import ExplorerBackend
 from .backends.explorer_extras import ExplorerExtras, supports_explorer_extras
 from .backends.rest import RestBackend
@@ -35,6 +41,7 @@ from .exceptions import (
 )
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .setup_wizard import run_setup
 from .sync import (
     SessionRelevanceClient,
     async_evaluate_session_relevance,
@@ -50,6 +57,9 @@ __all__ = [
     "BackendConnectionError",
     "BackendTimeoutError",
     "CertInfo",
+    "ClientQueryExtras",
+    "ClientQueryResponse",
+    "ClientQueryRow",
     "Config",
     "ConfigError",
     "ConnectionConfig",
@@ -77,6 +87,8 @@ __all__ = [
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
+    "run_setup",
+    "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",
 ]

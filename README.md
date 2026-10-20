@@ -183,6 +183,50 @@ could mean client relevance): `result.session_relevance`, the `to_dict()` /
 `--json` key, the error kind, and the `session_relevance=` /
 `session_relevances=` parameters.
 
+### BigFix Query (ClientQuery, provisional)
+
+`RestBackend` can also send **client** relevance to agents through the root
+server's BigFix Query API, for tools such as
+[bigfix-remote-client-relevance](https://github.com/jgstew/bigfix-remote-client-relevance)
+that want this package's config, credentials and certificate pinning. It is
+opt-in and separate: `evaluate()` is unchanged. Two calls, and polling is
+up to the caller, since rows accumulate as agents answer:
+
+```python
+import asyncio
+
+from bigfix_remote_session_relevance import (
+    RestBackend, TrustStore, load_config, supports_client_query,
+)
+
+conn = next(c for c in load_config().connections if c.backend == "rest")
+async with RestBackend.from_config(conn, trust=TrustStore()) as backend:
+    assert supports_client_query(backend)  # only RestBackend, for now
+    submitted = await backend.submit_client_query("computer name", [<COMPUTER_ID>])
+    if submitted.ok and submitted.query_id is not None:
+        results = await backend.client_query_results(submitted.query_id)
+        for _ in range(30):  # about a minute
+            if results.rows or not results.ok:
+                break
+            await asyncio.sleep(2)
+            results = await backend.client_query_results(submitted.query_id)
+        for row in results.rows:  # one row per value, per computer
+            print(row.computer_id, row.computer_name, row.is_failure, row.result)
+```
+
+Errors are results here too (`response.error` is a `ResultError`); only
+caller bugs raise (no computer ids, or ids that are not integers). Operators
+who are not master operators need the **Can Submit Queries** permission.
+Computers outside the operator's scope are accepted without an error but
+never answer, so stop polling on your own timeout.
+
+### Setup from another tool (provisional)
+
+`run_setup(path=None, *, backends=None)` is the interactive `--setup`
+wizard as a function returning its exit code. `path=None` is the usual
+config path; `backends=("rest",)` probes, and offers to save, only those
+backends.
+
 > **Upgrading from 0.4 or earlier:** 0.5.0 renamed, with no alias,
 > `result.relevance` → `result.session_relevance` (and the `--json` key),
 > the `relevance=` / `relevances=` parameters → `session_relevance=` /
@@ -213,7 +257,9 @@ Removing or changing any of these needs a new major version:
 
 **Provisional:** `Backend`, `RestBackend`, `ExplorerBackend`,
 `WebReportsBackend`, `SaasBackend`, `TrustStore`, `KnownCerts` and
-`CertInfo` are public and usable, but may change in a minor release (noted
+`CertInfo`, and (since 1.1.0) the BigFix Query names `ClientQueryExtras`,
+`ClientQueryResponse`, `ClientQueryRow`, `supports_client_query` and
+`run_setup`, are public and usable, but may change in a minor release (noted
 in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

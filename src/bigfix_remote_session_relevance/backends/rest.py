@@ -33,14 +33,21 @@ import json
 import re
 import time
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 import httpx
 
-from ..result import SessionRelevanceResult
+from ..result import ResultError, SessionRelevanceResult
 from ._parsing import parse_session_relevance_response
 from .base import Backend
+from .client_query import (
+    ClientQueryResponse,
+    ClientQueryRow,
+    client_query_body,
+    parse_results,
+    parse_submit,
+)
 from .explorer_extras import explorer_body
 
 JSON_RELEVANCE = "application/json+relevance"
@@ -49,6 +56,8 @@ EXPLORER_RECHECK_SECONDS = 300.0
 _NO_EXPLORER_RE = re.compile(r"no reachable BigFix Explorer", re.IGNORECASE)
 # Form errors that can mean Explorer is back (see the module docstring).
 _RETRY_JSON_RE = re.compile(r"character which is not allowed|invalid json", re.IGNORECASE)
+# A client query call: (query id, rows so far), or the server's error.
+_Outcome = tuple[int | None, list[ClientQueryRow]] | ResultError
 
 
 def encode_session_relevance(session_relevance: str) -> str:
@@ -116,6 +125,62 @@ class RestBackend(Backend):
             return parse_session_relevance_response(session_relevance, response, self.name)
 
         return await self._run(session_relevance, _op)
+
+    async def submit_client_query(
+        self, client_relevance: str, computer_ids: Sequence[int]
+    ) -> ClientQueryResponse:
+        """Submit client relevance to these computers; the response has the query id.
+
+        Opt-in BigFix Query (see ``client_query``). Raises only for caller
+        bugs (no computer ids, or ids that are not integers).
+        """
+        body = client_query_body(client_relevance, computer_ids)
+
+        async def _op(client: httpx.AsyncClient) -> _Outcome:
+            response = await client.post(
+                "/api/clientquery", content=body, headers={"Content-Type": "application/xml"}
+            )
+            found = parse_submit(response, self.name)
+            return found if isinstance(found, ResultError) else (found, [])
+
+        return await self._client_query(None, _op)
+
+    async def client_query_results(self, query_id: int) -> ClientQueryResponse:
+        """Every row a submitted query has so far; agents keep adding rows."""
+        if isinstance(query_id, bool) or not isinstance(query_id, int):
+            raise TypeError(f"query_id must be an integer, got {query_id!r}")
+
+        async def _op(client: httpx.AsyncClient) -> _Outcome:
+            response = await client.get(
+                f"/api/clientqueryresults/{query_id}", params={"output": "json"}
+            )
+            rows = parse_results(response, self.name)
+            return rows if isinstance(rows, ResultError) else (query_id, rows)
+
+        return await self._client_query(query_id, _op)
+
+    async def _client_query(
+        self,
+        query_id: int | None,
+        operation: Callable[[httpx.AsyncClient], Awaitable[_Outcome]],
+    ) -> ClientQueryResponse:
+        start = time.perf_counter()
+        outcome = await self._with_trust(operation)
+        rows: list[ClientQueryRow] = []
+        error: ResultError | None = None
+        if isinstance(outcome, ResultError):
+            error = outcome
+        else:
+            query_id, rows = outcome
+        return ClientQueryResponse(
+            query_id=query_id,
+            rows=rows,
+            error=error,
+            connection=self.connection,
+            server=self.address.base_url,
+            backend=self.name,
+            elapsed_ms=round((time.perf_counter() - start) * 1000, 3),
+        )
 
     async def _post_json(self, client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
         return await client.post(

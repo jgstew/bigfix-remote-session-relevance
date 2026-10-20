@@ -17,7 +17,7 @@ import ssl
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self, TypeVar
 
 import certifi
 import httpx
@@ -211,6 +211,8 @@ class _ClientCertError(Exception):
 # -- the base class -----------------------------------------------------------------
 
 Operation = Callable[[httpx.AsyncClient], Awaitable[SessionRelevanceResult]]
+# No PEP 695 type parameters: the package still supports Python 3.11.
+T = TypeVar("T")
 
 
 class Backend(ABC):
@@ -282,7 +284,7 @@ class Backend(ABC):
         trust: TrustPolicy | None = None,
         prompt: Callable[[str], str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-    ) -> Backend:
+    ) -> Self:
         return cls(
             conn.address,
             username=conn.username,
@@ -475,21 +477,32 @@ class Backend(ABC):
     async def _run_with_trust(
         self, session_relevance: str, operation: Operation
     ) -> SessionRelevanceResult:
+        result = await self._with_trust(operation)
+        if isinstance(result, ResultError):
+            return SessionRelevanceResult.failure(session_relevance, result)
+        return result
+
+    async def _with_trust(
+        self, operation: Callable[[httpx.AsyncClient], Awaitable[T]]
+    ) -> T | ResultError:
+        """Run one operation with credentials and TLS trust (TOFU) applied.
+
+        Every call to the server goes through here, so any API a backend
+        adds gets the same credential checks, pinning and error mapping as
+        ``evaluate()``. Failures come back as the `ResultError`, never raised.
+        """
         problem = await self.resolve_credentials() or self._auth_problem()
         if problem is not None:
-            return SessionRelevanceResult.failure(session_relevance, problem)
+            return problem
         for attempt in range(2):
             try:
                 client = self._get_client()
             except _ClientCertError as exc:
-                return SessionRelevanceResult.failure(
-                    session_relevance,
-                    ResultError(
-                        kind="tls",
-                        code="client_cert",
-                        backend=self.name,
-                        message=f"cannot load client certificate: {exc}",
-                    ),
+                return ResultError(
+                    kind="tls",
+                    code="client_cert",
+                    backend=self.name,
+                    message=f"cannot load client certificate: {exc}",
                 )
             try:
                 return await operation(client)
@@ -509,7 +522,7 @@ class Backend(ABC):
                             error = dataclasses.replace(
                                 error, message=f"{error.message}: {err.message}"
                             )
-                        return SessionRelevanceResult.failure(session_relevance, error)
+                        return error
                     if attempt == 0 and await self.trust.on_untrusted(self.address):
                         await self.aclose()
                         continue
@@ -523,7 +536,7 @@ class Backend(ABC):
                         ),
                         detail=err.message,
                     )
-                return SessionRelevanceResult.failure(session_relevance, err)
+                return err
         raise AssertionError("unreachable")  # pragma: no cover
 
     def _response_problem(self, response: httpx.Response) -> ResultError | None:

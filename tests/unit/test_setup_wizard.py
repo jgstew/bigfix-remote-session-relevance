@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from bigfix_remote_session_relevance.config import load_config
+from bigfix_remote_session_relevance.render import EXIT_USAGE
 from bigfix_remote_session_relevance.setup_wizard import (
     ProbeResult,
     candidates,
@@ -454,3 +455,118 @@ def test_setup_shows_server_text_without_control_characters(
     err = capsys.readouterr().err
     assert "\x1b" not in err
     assert "(bad%1b]0;pwned%07%0afake line)" in err
+
+
+def test_run_setup_backends_filter(tmp_path: Path) -> None:
+    # Only rest is offered for saving: no prompt for explorer or web reports.
+    path = tmp_path / "c.toml"
+    ask = _answers("bf.example.com", "op", "f", "y", "")
+    code = run_setup(
+        path,
+        backends=("rest",),
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+    )
+    assert code == 0
+    assert [c.backend for c in load_config(path).connections] == ["rest"]
+    assert not any("explorer" in p or "webreports" in p for p in ask.prompts)
+
+
+def test_run_setup_backends_filter_nothing_left(tmp_path: Path) -> None:
+    results = [ProbeResult("explorer", "bf", "ok", D1, "")]
+    code = run_setup(
+        tmp_path / "c.toml",
+        backends=("rest",),
+        input_fn=_answers("bf", "op"),
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(results),
+    )
+    assert code == 2
+    assert not (tmp_path / "c.toml").exists()
+
+
+def test_run_setup_rejects_unknown_backends(tmp_path: Path) -> None:
+    for backends in [("rest", "nope"), ()]:
+        with pytest.raises(ValueError, match="backends"):
+            run_setup(
+                tmp_path / "c.toml",
+                backends=backends,
+                input_fn=_answers(),
+                getpass_fn=lambda p: "pw",
+            )
+
+
+def test_run_setup_saas_host_outside_backends_asks_nothing_more(tmp_path: Path) -> None:
+    # Checked before the email and password are asked for, so nothing is sent.
+    ask = _answers("login.bigfix.com")
+    code = run_setup(
+        tmp_path / "c.toml",
+        backends=("rest",),
+        input_fn=ask,
+        getpass_fn=lambda p: pytest.fail("no password prompt"),
+    )
+    assert code == EXIT_USAGE
+    assert len(ask.prompts) == 1
+
+
+def test_run_setup_path_defaults_to_resolved_config_path(_isolated_home: Path) -> None:
+    results = [ProbeResult("rest", "bf.example.com", "ok", D1, "")]
+    code = run_setup(
+        input_fn=_answers("bf.example.com", "op", "f", "y", ""),
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(results),
+    )
+    assert code == 0
+    (conn,) = load_config(
+        _isolated_home / ".bigfix" / ".remote_session_connections.toml"
+    ).connections
+    assert conn.backend == "rest"
+
+
+async def test_probe_only_tries_requested_backends() -> None:
+    tried: list[str] = []
+
+    def factory(backend: str, server: str) -> httpx.AsyncBaseTransport:
+        tried.append(backend)
+        return httpx.MockTransport(lambda request: httpx.Response(401, text="no"))
+
+    results = await probe("bf", "op", "pw", None, backends=("rest",), transport_factory=factory)
+    assert tried == ["rest"]
+    assert [r.backend for r in results] == ["rest"]
+
+
+def test_run_setup_rejects_a_bare_backend_string(tmp_path: Path) -> None:
+    with pytest.raises(TypeError, match="backends"):
+        run_setup(tmp_path / "c.toml", backends="rest", input_fn=_answers())
+
+
+def test_run_setup_says_when_only_other_backends_answered(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    results = [ProbeResult("explorer", "bf", "ok", D1, "")]
+    code = run_setup(
+        tmp_path / "c.toml",
+        backends=("rest",),
+        input_fn=_answers("bf", "op"),
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(results),
+    )
+    assert code == 2
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "explorer" in out
+    assert "none of rest" in out
+    assert "Nothing answered" not in out
+
+
+def test_run_setup_saas_only_rejects_an_on_prem_host(tmp_path: Path) -> None:
+    ask = _answers("bf.example.com")
+    code = run_setup(
+        tmp_path / "c.toml",
+        backends=("saas",),
+        input_fn=ask,
+        getpass_fn=lambda p: pytest.fail("no password prompt"),
+    )
+    assert code == EXIT_USAGE
+    assert len(ask.prompts) == 1

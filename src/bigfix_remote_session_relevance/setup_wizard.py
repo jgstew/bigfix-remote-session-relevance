@@ -14,10 +14,12 @@ can reach.
 from __future__ import annotations
 
 import asyncio
+import functools
+import getpass
 import ipaddress
 import re
 import sys
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Collection, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -27,7 +29,7 @@ import httpx
 from .backends.base import Backend, TrustPolicy
 from .backends.registry import BACKEND_CLASSES
 from .backends.saas import SaasBackend
-from .config import ConnectionConfig, load_config, save_connection
+from .config import ConnectionConfig, load_config, resolve_config_path, save_connection
 from .deployment import (
     DEPLOYMENT_ID_SESSION_RELEVANCE,
     deployment_id_from_hashes,
@@ -88,6 +90,7 @@ async def probe(
     password: str,
     trust: TrustPolicy | None,
     *,
+    backends: Collection[str] | None = None,
     transport_factory: ProbeTransportFactory | None = None,
 ) -> list[ProbeResult]:
     async def one(backend_name: str, server: str) -> ProbeResult:
@@ -106,11 +109,13 @@ async def probe(
         async with backend:
             return await _probe_one(backend, server)
 
-    found = await asyncio.gather(*(one(b, s) for b, s in candidates(host)))
+    tried = [(b, s) for b, s in candidates(host) if backends is None or b in backends]
+    found = await asyncio.gather(*(one(b, s) for b, s in tried))
     results = [r for r in found if r.backend != "webreports"]
     web_reports = [r for r in found if r.backend == "webreports"]
     working = [r for r in web_reports if r.status in SAVEABLE]
-    results.append(working[0] if working else web_reports[0])
+    if web_reports:
+        results.append(working[0] if working else web_reports[0])
     return results
 
 
@@ -171,13 +176,30 @@ async def _probe_one(backend: Backend, server: str) -> ProbeResult:
 
 
 def run_setup(
-    path: Path,
+    path: str | Path | None = None,
     *,
-    input_fn: InputFn,
-    getpass_fn: InputFn,
+    backends: Collection[str] | None = None,
+    input_fn: InputFn = input,
+    getpass_fn: InputFn = getpass.getpass,
     probe_fn: ProbeFn | None = None,
     saas_probe_fn: SaasProbeFn | None = None,
 ) -> int:
+    """Interactively probe a server and save its connections; the exit code.
+
+    ``path=None`` is the config ``--setup`` would use. ``backends`` limits
+    which backends are probed and offered for saving, e.g. ``("rest",)``
+    for a caller that needs only the REST API.
+    """
+    if isinstance(backends, str):
+        raise TypeError(f"backends must be a collection of names, e.g. ({backends!r},)")
+    if backends is not None:
+        backends = frozenset(backends)
+        unknown = backends - set(BACKEND_CLASSES)
+        if not backends or unknown:
+            raise ValueError(
+                f"backends must be some of {sorted(BACKEND_CLASSES)}, got {sorted(backends)}"
+            )
+    path = resolve_config_path(path)
     say = _say
     say(f"Adding BigFix connections to {path}")
     host = input_fn(
@@ -187,6 +209,14 @@ def run_setup(
         say("a host is required")
         return EXIT_USAGE
     saas = is_saas_host(host)
+    # Decided before asking for a password, so nothing is sent to a host that
+    # cannot offer any of the requested backends.
+    if saas and backends is not None and "saas" not in backends:
+        say(f"{host} is BigFix SaaS, which is not one of {', '.join(sorted(backends))}")
+        return EXIT_USAGE
+    if not saas and backends == frozenset({"saas"}):
+        say(f"{host} is not a BigFix SaaS host (login.bigfix.com or eulogin.bigfix.com)")
+        return EXIT_USAGE
     username = input_fn("Email: " if saas else "Username: ").strip()
     password = getpass_fn("Password: ")
 
@@ -203,7 +233,17 @@ def run_setup(
 
         trust = TrustStore(callback=confirm_cert)
         say(f"Probing {host} ...")
-        results = asyncio.run((probe_fn or probe)(host, username, password, trust))
+        results = asyncio.run(
+            (probe_fn or functools.partial(probe, backends=backends))(
+                host, username, password, trust
+            )
+        )
+    answered_elsewhere: list[str] = []
+    if backends is not None:
+        answered_elsewhere = sorted(
+            {r.backend for r in results if r.backend not in backends and r.status in SAVEABLE}
+        )
+        results = [r for r in results if r.backend in backends]
 
     say("")
     for r in results:
@@ -221,6 +261,11 @@ def run_setup(
                 "BigFix SaaS did not accept the sign-in, so nothing is saved: failed logins "
                 "count toward a permanent account lock. Check the email, password and MFA "
                 "in the web UI before running --setup again."
+            )
+        elif answered_elsewhere and backends is not None:
+            say(
+                f"{', '.join(answered_elsewhere)} answered, but none of "
+                f"{', '.join(sorted(backends))} did; check the host, firewall and ports."
             )
         else:
             say("Nothing answered; check the host, firewall and ports.")
