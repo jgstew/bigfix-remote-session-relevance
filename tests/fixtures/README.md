@@ -14,7 +14,10 @@ reachable Explorer; `rest/captured/via_explorer__*` were taken with one, and
 states are kept.
 
 `saas/captured/*.json` are BigFix SaaS (`api.bigfix.com`) relevance response
-bodies captured through the bigfix-saas MCP server and a live login (deployment
-hash replaced). `saas/shape_login_ok.json` copies the observed login response
+bodies, captured through the bigfix-saas MCP server and a live login at
+first and now with `scripts/capture_fixtures.py --backend saas` (deployment
+hash replaced; no wrong-password probe, since failed logins count toward a
+permanent lock). Cases captured after Explorer came back exist on REST only
+as `via_explorer__*`; their tests skip the no-Explorer source. `saas/shape_login_ok.json` copies the observed login response
 *structure* with synthetic values; the real one carries the session only in
 `accessToken` / `refreshToken` cookies.

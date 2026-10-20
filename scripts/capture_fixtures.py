@@ -1,11 +1,16 @@
 """Capture real server responses as redacted test fixtures.
 
     uv run python scripts/capture_fixtures.py [--config PATH] [--out tests/fixtures]
+        [--backend NAME ...] [--only CASE ...]
 
 Runs a fixed set of probe queries against every enabled connection (through
 the library itself, so TLS pinning and auth behave exactly as in use), plus
-one deliberately wrong password per connection, and writes each raw response
-to ``<out>/<backend>/captured/<case>.body`` with a ``.meta.json`` beside it.
+one deliberately wrong password per on-prem connection (never BigFix SaaS,
+where failed logins count toward a permanent lock), and writes each raw
+response to ``<out>/<backend>/captured/<case>.body`` with a ``.meta.json``
+beside it; SaaS responses go to ``<out>/saas/captured/<case>.json`` (body
+only, the existing SaaS fixture form). ``--backend`` and ``--only`` limit the
+run, e.g. to add one case without re-capturing the rest.
 
 REST answers differently depending on whether the root server can reach a
 BigFix Explorer (see backends/rest.py), so note which state the deployment
@@ -72,8 +77,9 @@ QUERIES = {
     "date": 'date "17 Oct 2026"',
     "time_of_day": 'time_of_day "13:45:00"',
     "time_interval": "(now - (now - 90*minute))",
-    # Three parts: a four-part version looks like an IPv4 address to redact().
     "version": '"11.0.7" as version',
+    # PRESERVED below, or redact() would take it for an IPv4 address.
+    "version_four_part": '"11.0.7.48" as version',
     "date_parts": (
         "(day_of_week of it, month of it, year of it, day_of_month of it, "
         'month_and_year of it) of date "17 Oct 2026"'
@@ -82,17 +88,36 @@ QUERIES = {
     "negative_integer": "(0 - 5)",
     "empty_string": '""',
     "tuple_mixed": '(date "17 Oct 2026", "1.5" as floating point, "1.2" as version)',
+    # The live suite's special characters: REST's URL decoding and SOAP's XML
+    # escaping must leave them intact (%22 is relevance's own quote escape).
+    "special_chars": "\"a+b & c %22 <q> 's' \\ / ?x=1#y\"",
+    # BigFix's floating point text in more shapes (the SaaS gateway's differs).
+    "floating_point_forms": (
+        '("2.5e-8" as floating point; "100" as floating point; "0" as floating point; '
+        '"-0.5" as floating point; "-1e300" as floating point; "1234567" as floating point; '
+        '"123456789012.5" as floating point; "1e100" as floating point)'
+    ),
+    # Evaluation errors beyond an unknown operator.
+    "error_too_large": '"12345678901234567890" as floating point',
+    "error_no_string": "(bes sites) whose (master site flag of it)",
+    "error_nonexistent": '"3 days 04:05:06" as time interval',
 }
+# Probe literals that look like something redact() replaces; kept as they are.
+PRESERVED = ("11.0.7.48",)
 REDACTED_GATHER = "http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite"
 _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")
 
 
-async def capture(conn: ConnectionConfig, trust: TrustStore) -> dict[str, SessionRelevanceResult]:
+async def capture(
+    conn: ConnectionConfig, trust: TrustStore, only: set[str] | None = None
+) -> dict[str, SessionRelevanceResult]:
     results: dict[str, SessionRelevanceResult] = {}
     async with backend_from_config(conn, trust=trust) as backend:
         for key, session_relevance in QUERIES.items():
-            results[key] = await backend.evaluate(session_relevance)
-    if conn.backend in ("rest", "explorer", "webreports") and conn.auth == "basic":
+            if only is None or key in only:
+                results[key] = await backend.evaluate(session_relevance)
+    wanted = only is None or "bad_password" in only
+    if wanted and conn.backend in ("rest", "explorer", "webreports") and conn.auth == "basic":
         # A fresh backend, so no session cookie or token from above is reused.
         wrong = dataclasses.replace(conn, password="definitely-wrong", password_env=None)  # noqa: S106
         async with backend_from_config(wrong, trust=trust) as backend:
@@ -104,16 +129,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config")
     parser.add_argument("--out", default="tests/fixtures", type=Path)
+    parser.add_argument("--backend", action="append", help="only connections of this backend")
+    parser.add_argument("--only", action="append", metavar="CASE", help="only this case")
     args = parser.parse_args()
+    only = set(args.only) if args.only else None
+    if only and (unknown := only - set(QUERIES) - {"bad_password"}):
+        parser.error(f"unknown cases: {', '.join(sorted(unknown))}")
 
     config = load_config(args.config)
-    # saas is a placeholder with nothing to capture yet.
-    connections = tuple(c for c in config.enabled_connections() if c.backend != "saas")
+    connections = tuple(
+        c for c in config.enabled_connections() if not args.backend or c.backend in args.backend
+    )
     if not connections:
         print("no enabled connections", file=sys.stderr)
         return 1
     trust = TrustStore(KnownCerts())
-    captured = asyncio.run(_capture_all(connections, trust))
+    captured = asyncio.run(_capture_all(connections, trust, only))
 
     hosts: set[str] = {c.address.host for c in connections}
     secrets: set[str] = set()
@@ -132,19 +163,33 @@ def main() -> int:
             if result.raw is None:
                 print(f"{conn.name} {key}: no response ({result.error})", file=sys.stderr)
                 continue
-            body = _HASH_RE.sub(fake_hash, redact(result.raw.text, hosts=hosts, secrets=secrets))
+            body = _HASH_RE.sub(fake_hash, _redact(result.raw.text, hosts, secrets))
+            print(f"{conn.name:<24} {key:<24} {result.raw.status_code}")
+            if conn.backend == "saas":
+                (out_dir / f"{key}.json").write_text(body)
+                continue
             meta = {"status": result.raw.status_code, "content_type": result.raw.content_type}
             (out_dir / f"{key}.body").write_text(body)
             (out_dir / f"{key}.meta.json").write_text(json.dumps(meta) + "\n")
-            print(f"{conn.name:<24} {key:<24} {result.raw.status_code}")
     print(f"wrote fixtures under {args.out}; review the diff before committing")
     return 0
 
 
+def _redact(text: str, hosts: set[str], secrets: set[str]) -> str:
+    """`redact`, leaving the PRESERVED probe literals as they are."""
+    placeholders = {f"\x00{i}\x00": literal for i, literal in enumerate(PRESERVED)}
+    for placeholder, literal in placeholders.items():
+        text = text.replace(literal, placeholder)
+    text = redact(text, hosts=hosts, secrets=secrets)
+    for placeholder, literal in placeholders.items():
+        text = text.replace(placeholder, literal)
+    return text
+
+
 async def _capture_all(
-    connections: tuple[ConnectionConfig, ...], trust: TrustStore
+    connections: tuple[ConnectionConfig, ...], trust: TrustStore, only: set[str] | None
 ) -> dict[str, dict[str, SessionRelevanceResult]]:
-    found = await asyncio.gather(*(capture(c, trust) for c in connections))
+    found = await asyncio.gather(*(capture(c, trust, only) for c in connections))
     return {c.name: r for c, r in zip(connections, found, strict=True)}
 
 

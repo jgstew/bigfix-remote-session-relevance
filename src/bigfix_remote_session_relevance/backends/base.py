@@ -161,6 +161,18 @@ def error_from_status(response: httpx.Response, backend: str) -> ResultError:
 _ERROR_PREFIX_RE = re.compile(r"^\s*(?:relevance\s+error|error)\s*:\s*", re.IGNORECASE)
 
 
+# (observed) An evaluation exception is named "class TooLargeForStandardNotation"
+# by the on-prem servers and "27TooLargeForStandardNotation" by BigFix SaaS: a
+# mangled C++ type name, its length then the name. Only that exact shape (the
+# number equal to the name's length) is rewritten.
+_MANGLED_RE = re.compile(r"(could not be evaluated: )(\d+)([A-Za-z_]\w*)")
+
+
+def _unmangle(match: re.Match[str]) -> str:
+    prefix, length, name = match.groups()
+    return f"{prefix}class {name}" if int(length) == len(name) else match.group(0)
+
+
 def normalize_relevance_error(text: str | None) -> str:
     """Strip backend-specific prefixes so one bad query reads the same everywhere."""
     message = " ".join((text or "").split())
@@ -169,7 +181,7 @@ def normalize_relevance_error(text: str | None) -> str:
         if stripped == message:
             break
         message = stripped
-    return message or "unknown error"
+    return _MANGLED_RE.sub(_unmangle, message) or "unknown error"
 
 
 # -- TLS contexts -----------------------------------------------------------------
