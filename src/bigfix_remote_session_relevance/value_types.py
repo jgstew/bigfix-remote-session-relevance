@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, TypeAlias
+from typing import Any, Self, TypeAlias
 
 # A parsed type: a scalar type name, or a tuple of parsed types.
 TypeNode: TypeAlias = "str | tuple[TypeNode, ...]"
@@ -20,6 +20,36 @@ _INT_RE = re.compile(r"^[+-]?\d+$")
 
 class _Malformed(ValueError):
     pass
+
+
+class JsonNumber(float):
+    """A JSON number that remembers the server's text for it.
+
+    The REST API and Explorer send floating points as JSON numbers whose
+    text is what Web Reports sends as text (``0.000001234``, ``1.0e+300``);
+    ``str(float)`` would give ``1.234e-06`` and ``1e+300``. ``str()`` of this
+    (and so a floating-point answer) is the server's text, so ``answers``
+    agree across backends. It is still a ``float``: arithmetic and equality
+    are a float's, and ``repr()`` / ``json.dumps`` give Python's form.
+    """
+
+    text: str
+
+    def __new__(cls, text: str) -> Self:
+        number = super().__new__(cls, text)
+        number.text = text
+        return number
+
+    def __str__(self) -> str:
+        return self.text
+
+    def __getnewargs__(self) -> tuple[str]:  # type: ignore[override]  # pickle/copy keep the text
+        return (self.text,)
+
+
+def loads_json(text: str) -> Any:
+    """`json.loads`, with non-integer numbers as `JsonNumber`."""
+    return json.loads(text, parse_float=JsonNumber)
 
 
 def parse_type(text: str | None) -> TypeNode | None:

@@ -79,7 +79,13 @@ field differ.
   200. Plain-method errors and bad logins are SOAP Faults, also HTTP 200
   ("Invalid username or password.").
 - **(observed)** Typed result elements: `Integer`, `String`, `Boolean`,
-  `DateTime`, `Tuple` (nested). `DateTime` is ISO 8601
+  `FloatingPoint`, `DateTime`, `Tuple` (nested). Every other type seen is
+  `<String>`: `date`, `time of day`, `time interval`, `version`, `day of
+  week`, `month`, `year`, `day of month`, `month and year` (11.0.7, 2026-10-19;
+  captures `date`, `version`, `date_parts`, …). `FloatingPoint` text is the
+  same as the REST API's JSON number text, with and without a reachable
+  Explorer, and Explorer's (`0.000001234`, `1.0e+300`, `3.0`).
+  `DateTime` is ISO 8601
   (`2026-10-17T17:09:32-04:00`) and is converted to the BigFix format the
   other backends return (`Sat, 17 Oct 2026 17:09:32 -0400`), locale
   independently. `evaltime` is in milliseconds (matches REST `evaltime_ms`).
@@ -130,6 +136,18 @@ the bigfix-saas MCP server, which makes the same choices).
   as nested arrays, times in BigFix format, `evaltime` in ms); relevance errors
   are `{"data": {"error": "…"}}` with HTTP 200. `/bfproxy/v1/relevance` answers
   identically.
+- **Numbers are re-encoded** by the gateway as JavaScript numbers (2026-10-19):
+  integers above 2**53 lose precision (`9223372036854775807` arrives as
+  `9223372036854776000`, `9007199254740993` as `9007199254740992`), and
+  floating points use JavaScript's form (`3`, `1e+300`, `1e-7`, `0.3`), not
+  BigFix's (`3.0`, `1.0e+300`, `0.0000001`, `0.30000000000000`). BigFix's
+  text can't be rebuilt from it, so SaaS answers keep the gateway's text and
+  are the one exception to identical answers across backends. A query that
+  needs the exact value can ask for `as string`.
+- **Email case doesn't matter** to sign-in (2026-10-19: the configured email
+  upper-cased signed in to the same account), so the shared sign-in key
+  lowercases it: differently cased connections share one session and one
+  cached failure.
 - No Explorer extras: `prefilter` takes BigFix's criteria DSL, not relevance
   strings, so it does not fit `ExplorerExtras`.
 - **Setup:** `--setup` treats an https `login.` / `eulogin.` / `api.` /
@@ -206,7 +224,7 @@ key.
 | Field | Meaning |
 |---|---|
 | `session_relevance` | the query |
-| `answers` | native values, coerced by `type`: `integer`→`int`, `boolean`→`bool`, tuples→`tuple`, otherwise `str`; `dict` only from Explorer `keys` |
+| `answers` | native values, coerced by `type`: `integer`→`int`, `boolean`→`bool`, tuples→`tuple`, otherwise `str` (a `floating point` is the server's text, e.g. `"0.000001234"`, never re-formatted by Python; a number with no type to coerce it, e.g. in an Explorer `keys` dict, stays a `float`); `dict` only from Explorer `keys` |
 | `answer_strings` | BigFix-style strings; tuples joined with `", "` |
 | `type`, `plural`, `evaluation_time_ms` | as reported by the server (`None` if unknown) |
 | `error` | `ResultError` or `None` |
@@ -428,14 +446,10 @@ Python classifiers equal to the versions CI tests.
 
 - **SaaS:** what the gateway does with no `sid` on an account with several
   servers (setup does not rely on it; only one-server accounts were seen
-  live). Whether the service treats email case-insensitively (the shared
-  sign-in key compares it exactly, so differently cased connections sign in
-  separately). Logout on close is not sent (v1 sessions are not counted
-  against the cap).
+  live). Logout on close is not sent (v1 sessions are not counted against
+  the cap).
 - Whether the second URL decode on the no-Explorer path (confirmed live:
   `%xx` only, not `+`) happens in the root server or in the Web Reports it
   forwards to. It does not change what the client must send.
-- `GetStructuredRelevanceResult` element names for other types (`Float`?,
-  dates without time, versions) beyond those observed.
 - Whether a multi-datasource Web Reports really returns several gather URL
   hashes.

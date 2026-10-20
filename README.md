@@ -157,6 +157,14 @@ async with AsyncSessionRelevanceClient() as client:  # default config
     )
 ```
 
+`integer` and `boolean` answers are `int` and `bool`; every other type
+(`floating point`, `date`, `version`, `time interval`, …) is text, the same
+on REST, Explorer and Web Reports (a `time` from Web Reports is converted
+from ISO 8601 to the BigFix form the others send). BigFix SaaS is the one
+exception for numbers: its gateway re-encodes them as JavaScript numbers, so
+a floating point can read `3` instead of `3.0` and integers above 2**53 lose
+precision (ask for `as string` when the exact value matters).
+
 String answers are the decoded text on every backend (`"a%09b"` gives
 `a<TAB>b`). Pass `unescape=False` to any `evaluate*` method or to
 `evaluate_session_relevance()` / `async_evaluate_session_relevance()` (CLI:
