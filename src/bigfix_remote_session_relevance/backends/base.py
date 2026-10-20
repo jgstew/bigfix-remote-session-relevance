@@ -163,9 +163,10 @@ _ERROR_PREFIX_RE = re.compile(r"^\s*(?:relevance\s+error|error)\s*:\s*", re.IGNO
 
 # (observed) An evaluation exception is named "class TooLargeForStandardNotation"
 # by the on-prem servers and "27TooLargeForStandardNotation" by BigFix SaaS: a
-# mangled C++ type name, its length then the name. Only that exact shape (the
-# number equal to the name's length) is rewritten.
-_MANGLED_RE = re.compile(r"(could not be evaluated: )(\d+)([A-Za-z_]\w*)")
+# mangled C++ type name, its length then the name. Only that whole message, with
+# the number equal to the name's length, is rewritten: never text inside a
+# user's `error "..."`.
+_MANGLED_RE = re.compile(r"^(The expression could not be evaluated: )(\d+)([A-Za-z_]\w*)$")
 
 
 def _unmangle(match: re.Match[str]) -> str:

@@ -168,3 +168,16 @@ def test_secrets_not_in_repr() -> None:
 )
 def test_normalize_relevance_error_unmangles_saas_exception_names(text: str, expected: str) -> None:
     assert normalize_relevance_error(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # An `error "..."` message is the query author's text: never rewritten.
+        "User-defined error: could not be evaluated: 3day",
+        "The expression could not be evaluated: 27TooLargeForStandardNotation and more",
+        "Before. The expression could not be evaluated: 27TooLargeForStandardNotation",
+    ],
+)
+def test_normalize_relevance_error_only_unmangles_the_observed_shape(text: str) -> None:
+    assert normalize_relevance_error(text) == text

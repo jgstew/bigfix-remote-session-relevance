@@ -11,13 +11,16 @@ REST captures without a prefix were taken while the root server had no
 reachable Explorer; `rest/captured/via_explorer__*` were taken with one, and
 `rest/captured/forwarded_*` / `explorer/captured/extras_*` are Explorer
 `keys`/`filters` responses. See DESIGN.md § REST API for why both REST
-states are kept.
+states are kept. The capture script writes REST files unprefixed, so rename
+captures taken with Explorer reachable (a `"count"` key in the JSON) to
+`via_explorer__*`. Cases first captured with Explorer reachable exist only
+in that form; their tests skip the no-Explorer source.
 
 `saas/captured/*.json` are BigFix SaaS (`api.bigfix.com`) relevance response
 bodies, captured through the bigfix-saas MCP server and a live login at
-first and now with `scripts/capture_fixtures.py --backend saas` (deployment
-hash replaced; no wrong-password probe, since failed logins count toward a
-permanent lock). Cases captured after Explorer came back exist on REST only
-as `via_explorer__*`; their tests skip the no-Explorer source. `saas/shape_login_ok.json` copies the observed login response
+first and now with `scripts/capture_fixtures.py --backend saas` (no
+wrong-password probe, since failed logins count toward a permanent lock;
+`deployment_id.json` is a synthetic id the script never overwrites).
+`saas/shape_login_ok.json` copies the observed login response
 *structure* with synthetic values; the real one carries the session only in
 `accessToken` / `refreshToken` cookies.

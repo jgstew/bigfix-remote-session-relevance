@@ -19,6 +19,7 @@ from bigfix_remote_session_relevance import escape_result
 from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
 from bigfix_remote_session_relevance.backends.rest import RestBackend
 from bigfix_remote_session_relevance.backends.webreports import WebReportsBackend
+from bigfix_remote_session_relevance.deployment import deployment_id_from_hashes
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 # sha256 of the redacted gather URL http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite
@@ -188,15 +189,20 @@ async def test_evaluation_errors(
 
 
 @pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
-async def test_deployment_id_is_the_sha256_of_the_gather_url(
+async def test_gather_url_and_deployment_id_fixtures_agree(
     source: tuple[str, str], recording_transport: type
 ) -> None:
-    # Offline twin of test_live_deployment_id_matches_local_hash; the capture
-    # script recomputes the id from the redacted URL, so the two stay tied.
+    # A consistency guard, not a server check: the capture script makes the
+    # captured id the sha256 of the redacted gather URL (the live check is
+    # test_live_deployment_id_matches_local_hash). What this pins offline is
+    # that the local fallback, which hashes the gather URL itself, gives the
+    # id the server-side hash gives, from the same fixtures.
     gather = await _from_source(source, "gather_url_hash_check", recording_transport)
     deployment = await _from_source(source, "deployment_id", recording_transport)
-    (url,) = gather.answers
-    assert deployment.answers == (hashlib.sha256(url.encode()).hexdigest(),)
+    local = deployment_id_from_hashes(
+        hashlib.sha256(str(u).encode()).hexdigest() for u in gather.answers
+    )
+    assert deployment_id_from_hashes(deployment.answers) == local == DEPLOYMENT_HASH
 
 
 @pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)

@@ -259,6 +259,8 @@ async def test_captured_evaluation_errors_read_as_on_prem(
         result = await backend.evaluate("q")
     assert result.error is not None
     assert (result.error.kind, result.error.message) == ("session_relevance", message)
+    if name == "error_too_large":  # detail keeps the server's own text
+        assert "27TooLargeForStandardNotation" in (result.error.detail or "")
 
 
 @pytest.mark.parametrize("name", ["nested_tuple", "empty_plural", "error_unknown"])

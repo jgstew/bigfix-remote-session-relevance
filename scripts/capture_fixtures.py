@@ -19,9 +19,13 @@ Explorer, the ``via_explorer__`` ones with Explorer. Capture into a scratch
 ``--out`` and copy across, rather than overwriting the other state's files.
 
 Redaction: session tokens, IPv4 addresses, configured hosts, the gather URL
-host and every configured username/password are replaced, and the deployment
-hash is recomputed from the redacted gather URL so fixtures stay consistent.
-Review the diff before committing anyway.
+host and every configured username/password are replaced, and every 64-hex
+value (the deployment hash) becomes the sha256 of REDACTED_GATHER, which is
+what an on-prem gather URL redacts to, so the two fixtures stay consistent.
+The gather URL is always asked for, even with ``--only``, so its host is
+redacted. BigFix SaaS's ``deployment_id`` / ``gather_url_hash_check`` are not
+written: its gather URL need not redact to REDACTED_GATHER, and its committed
+id is synthetic. Review the diff before committing anyway.
 """
 
 from __future__ import annotations
@@ -99,12 +103,16 @@ QUERIES = {
     ),
     # Evaluation errors beyond an unknown operator.
     "error_too_large": '"12345678901234567890" as floating point',
+    # A plural of objects with no string form: every backend answers that
+    # the "string" operator (used to render answers) is not defined.
     "error_no_string": "(bes sites) whose (master site flag of it)",
     "error_nonexistent": '"3 days 04:05:06" as time interval',
 }
-# Probe literals that look like something redact() replaces; kept as they are.
-PRESERVED = ("11.0.7.48",)
+# Probe literals redact() would take for an IPv4 address, kept only in the
+# body of their own case and only as a whole value.
+PRESERVED = {"version_four_part": ("11.0.7.48",)}
 REDACTED_GATHER = "http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite"
+_SAAS_NOT_WRITTEN = frozenset({"deployment_id", "gather_url_hash_check"})
 _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")
 
 
@@ -114,7 +122,8 @@ async def capture(
     results: dict[str, SessionRelevanceResult] = {}
     async with backend_from_config(conn, trust=trust) as backend:
         for key, session_relevance in QUERIES.items():
-            if only is None or key in only:
+            # The gather URL always: its host must be redacted from the rest.
+            if only is None or key in only or key == "gather_url_hash_check":
                 results[key] = await backend.evaluate(session_relevance)
     wanted = only is None or "bad_password" in only
     if wanted and conn.backend in ("rest", "explorer", "webreports") and conn.auth == "basic":
@@ -160,10 +169,15 @@ def main() -> int:
         out_dir = args.out / conn.backend / "captured"
         out_dir.mkdir(parents=True, exist_ok=True)
         for key, result in results.items():
+            if only is not None and key not in only:
+                continue
+            if conn.backend == "saas" and key in _SAAS_NOT_WRITTEN:
+                print(f"{conn.name} {key}: not written for BigFix SaaS", file=sys.stderr)
+                continue
             if result.raw is None:
                 print(f"{conn.name} {key}: no response ({result.error})", file=sys.stderr)
                 continue
-            body = _HASH_RE.sub(fake_hash, _redact(result.raw.text, hosts, secrets))
+            body = _HASH_RE.sub(fake_hash, _redact(result.raw.text, hosts, secrets, key))
             print(f"{conn.name:<24} {key:<24} {result.raw.status_code}")
             if conn.backend == "saas":
                 (out_dir / f"{key}.json").write_text(body)
@@ -175,14 +189,25 @@ def main() -> int:
     return 0
 
 
-def _redact(text: str, hosts: set[str], secrets: set[str]) -> str:
-    """`redact`, leaving the PRESERVED probe literals as they are."""
-    placeholders = {f"\x00{i}\x00": literal for i, literal in enumerate(PRESERVED)}
-    for placeholder, literal in placeholders.items():
-        text = text.replace(literal, placeholder)
+def _redact(text: str, hosts: set[str], secrets: set[str], case: str) -> str:
+    """`redact`, leaving `case`'s PRESERVED literals as they are.
+
+    Secrets go first, so a secret containing a literal is still replaced;
+    then each literal is protected only where it stands alone (the same
+    boundaries as redact's IPv4 match), so 111.0.7.48 is not.
+    """
+    if "\x00" in text:
+        sys.exit("refusing to redact a response containing NUL")
+    literals = PRESERVED.get(case, ())
+    if clash := set(literals) & {h.lower() for h in hosts}:
+        sys.exit(f"a PRESERVED literal is a configured host: {', '.join(sorted(clash))}")
+    for secret in sorted((s for s in secrets if s), key=len, reverse=True):
+        text = text.replace(secret, "REDACTED")
+    for i, literal in enumerate(literals):
+        text = re.sub(rf"(?<![\d.]){re.escape(literal)}(?![\d.])", f"\x00{i}\x00", text)
     text = redact(text, hosts=hosts, secrets=secrets)
-    for placeholder, literal in placeholders.items():
-        text = text.replace(placeholder, literal)
+    for i, literal in enumerate(literals):
+        text = text.replace(f"\x00{i}\x00", literal)
     return text
 
 
