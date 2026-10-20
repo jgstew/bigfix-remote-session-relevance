@@ -270,7 +270,11 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 
 Session relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the
-server's text.
+server's text. **(observed, 2026-10-19)** An evaluation exception is
+`class TooLargeForStandardNotation` on-prem but `27TooLargeForStandardNotation`
+on BigFix SaaS (a mangled C++ type name: its length, then the name); the SaaS
+form is rewritten to the on-prem one, only when the number equals the name's
+length (capture `error_too_large`).
 
 ## Fan-out, grouping and failover
 

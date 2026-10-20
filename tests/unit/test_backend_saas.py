@@ -185,6 +185,10 @@ SUCCESS = {
         False,
     ),
     "negative_integer": ((-5,), "integer", False),
+    "plural_integers": ((1, 2, 3), "integer", True),
+    "plural_strings": (("alpha", "beta"), "string", True),
+    "tuple": (((1, "a", True),), "( integer, string, boolean )", False),
+    "version_four_part": (("11.0.7.48",), "version", False),
     "empty_string": (("",), "string", False),
     # (observed) The SaaS gateway re-encodes numbers as JavaScript numbers:
     # floating points come in its form (3, 1e+300), not BigFix's (3.0,
@@ -198,6 +202,11 @@ SUCCESS = {
     "floating_point_large": (("1e+300",), "floating point", False),
     "big_integer": ((9223372036854776000,), "integer", False),
     "integer_above_2_53": ((9007199254740992,), "integer", False),  # sent: 9007199254740993
+    "floating_point_forms": (
+        ("2.5e-8", "100", "0", "-0.5", "-1e+300", "1234567", "123456789012.5", "1e+100"),
+        "floating point",
+        True,
+    ),
     "tuple_mixed": (
         (("Sat, 17 Oct 2026", "1.5", "1.2"),),
         "( date, floating point, version )",
@@ -227,6 +236,31 @@ async def test_captured_relevance_error(recording_transport: type) -> None:
     assert result.error.message == 'The operator "foo bar baz" is not defined.'
     assert result.answers == ()
     assert result.plural is None
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("error_no_string", 'The operator "string" is not defined.'),
+        ("error_nonexistent", "Singular expression refers to nonexistent object."),
+        # SaaS names the exception "27TooLargeForStandardNotation", a mangled
+        # C++ name (its length, then the name); on-prem says "class ...".
+        (
+            "error_too_large",
+            "The expression could not be evaluated: class TooLargeForStandardNotation",
+        ),
+    ],
+)
+async def test_captured_evaluation_errors_read_as_on_prem(
+    name: str, message: str, recording_transport: type
+) -> None:
+    rec = recording_transport([_login_ok(), _captured(name)])
+    async with _backend(rec) as backend:
+        result = await backend.evaluate("q")
+    assert result.error is not None
+    assert (result.error.kind, result.error.message) == ("session_relevance", message)
+    if name == "error_too_large":  # detail keeps the server's own text
+        assert "27TooLargeForStandardNotation" in (result.error.detail or "")
 
 
 @pytest.mark.parametrize("name", ["nested_tuple", "empty_plural", "error_unknown"])

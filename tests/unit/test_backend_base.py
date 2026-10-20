@@ -146,3 +146,38 @@ def test_secrets_not_in_repr() -> None:
     assert "s3cret-pw" not in repr(backend)
     backend2 = RestBackend("h", token="s3cret-tok")
     assert "s3cret-tok" not in repr(backend2)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "The expression could not be evaluated: 27TooLargeForStandardNotation",
+            "The expression could not be evaluated: class TooLargeForStandardNotation",
+        ),
+        (  # already on-prem form
+            "The expression could not be evaluated: class TooLargeForStandardNotation",
+            "The expression could not be evaluated: class TooLargeForStandardNotation",
+        ),
+        (  # length doesn't match: not a mangled name, left alone
+            "The expression could not be evaluated: 12abc",
+            "The expression could not be evaluated: 12abc",
+        ),
+        ("Error: 27TooLargeForStandardNotation", "27TooLargeForStandardNotation"),
+    ],
+)
+def test_normalize_relevance_error_unmangles_saas_exception_names(text: str, expected: str) -> None:
+    assert normalize_relevance_error(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # An `error "..."` message is the query author's text: never rewritten.
+        "User-defined error: could not be evaluated: 3day",
+        "The expression could not be evaluated: 27TooLargeForStandardNotation and more",
+        "Before. The expression could not be evaluated: 27TooLargeForStandardNotation",
+    ],
+)
+def test_normalize_relevance_error_only_unmangles_the_observed_shape(text: str) -> None:
+    assert normalize_relevance_error(text) == text

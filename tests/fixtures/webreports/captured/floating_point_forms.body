@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+	<soapenv:Header>
+		<bf:ResponseHeaderElement xmlns:bf="http://schemas.bigfix.com/Relevance" xmlns:xsi="http://www.w3.org/2001/XML-Schema-instance">
+			<bf:sessionToken>REDACTED</bf:sessionToken>
+		</bf:ResponseHeaderElement>
+	</soapenv:Header>
+	<soapenv:Body>
+		<GetStructuredRelevanceResultResponse xmlns="http://schemas.bigfix.com/Relevance">
+			<StructuredRelevanceResult>
+				<results>
+					<FloatingPoint>0.000000025</FloatingPoint>
+					<FloatingPoint>100.0</FloatingPoint>
+					<FloatingPoint>0.0</FloatingPoint>
+					<FloatingPoint>-0.5</FloatingPoint>
+					<FloatingPoint>-1.0e+300</FloatingPoint>
+					<FloatingPoint>1234567.0</FloatingPoint>
+					<FloatingPoint>123456789012.5</FloatingPoint>
+					<FloatingPoint>1.0e+100</FloatingPoint>
+				</results>
+				<plural>true</plural>
+				<type>floating point</type>
+				<evaltime>0</evaltime>
+			</StructuredRelevanceResult>
+		</GetStructuredRelevanceResultResponse>
+	</soapenv:Body>
+</soapenv:Envelope>

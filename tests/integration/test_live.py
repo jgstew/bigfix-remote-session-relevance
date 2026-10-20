@@ -52,20 +52,36 @@ CASES: list[tuple[str, tuple[Any, ...], str | None, bool | None]] = [
     ('""', ("",), "string", False),
 ]
 
+# The same message on every backend (SaaS's mangled exception name included).
+ERROR_CASES = [
+    ("foo bar baz", 'The operator "foo bar baz" is not defined.'),
+    (
+        '"12345678901234567890" as floating point',
+        "The expression could not be evaluated: class TooLargeForStandardNotation",
+    ),
+    ('"3 days 04:05:06" as time interval', "Singular expression refers to nonexistent object."),
+]
+
 # Numbers keep the server's text. The SaaS gateway re-encodes numbers as
 # JavaScript numbers, so it has its own expectations (DESIGN.md § BigFix SaaS).
 FLOATS = (
     '("1.5" as floating point; "0.000001234" as floating point; '
     '"1e300" as floating point; "3" as floating point)'
 )
+FORMS = (
+    '("2.5e-8" as floating point; "100" as floating point; "0" as floating point; '
+    '"-0.5" as floating point; "-1e300" as floating point)'
+)
 NUMBER_CASES: dict[str, list[tuple[str, tuple[Any, ...], str | None, bool | None]]] = {
     "on_prem": [
         (FLOATS, ("1.5", "0.000001234", "1.0e+300", "3.0"), "floating point", True),
         ("9223372036854775807", (9223372036854775807,), "integer", False),
+        (FORMS, ("0.000000025", "100.0", "0.0", "-0.5", "-1.0e+300"), "floating point", True),
     ],
     "saas": [
         (FLOATS, ("1.5", "0.000001234", "1e+300", "3"), "floating point", True),
         ("9223372036854775807", (9223372036854776000,), "integer", False),
+        (FORMS, ("2.5e-8", "100", "0", "-0.5", "-1e+300"), "floating point", True),
     ],
 }
 
@@ -116,10 +132,11 @@ async def test_live_normalized_results(
 )
 async def test_live_relevance_error(backend: str, live_config_path: Path, tmp_path: Path) -> None:
     async with await _client(backend, live_config_path, tmp_path) as client:
-        for result in await client.evaluate("foo bar baz"):
-            assert result.error is not None
-            assert result.error.kind == "session_relevance"
-            assert result.error.message == 'The operator "foo bar baz" is not defined.'
+        for session_relevance, message in ERROR_CASES:
+            for result in await client.evaluate(session_relevance):
+                assert result.error is not None
+                assert result.error.kind == "session_relevance"
+                assert result.error.message == message
 
 
 @pytest.mark.parametrize(

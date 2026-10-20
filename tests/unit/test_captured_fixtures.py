@@ -6,6 +6,7 @@ tests/fixtures/README.md. These, not the docs, are the ground truth.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -18,6 +19,7 @@ from bigfix_remote_session_relevance import escape_result
 from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
 from bigfix_remote_session_relevance.backends.rest import RestBackend
 from bigfix_remote_session_relevance.backends.webreports import WebReportsBackend
+from bigfix_remote_session_relevance.deployment import deployment_id_from_hashes
 
 FIXTURES = Path(__file__).parent.parent / "fixtures"
 # sha256 of the redacted gather URL http://bigfix.example.com:52311/cgi-bin/bfgather.exe/actionsite
@@ -103,6 +105,24 @@ TYPED_WITH_EXPLORER = {
     "floating_point_tiny": (("0.0000001",), "floating point", False),
     "floating_point_rounding": (("0.30000000000000",), "floating point", False),
     "integer_above_2_53": ((9007199254740993,), "integer", False),
+    "version_four_part": (("11.0.7.48",), "version", False),
+    # The live suite's special characters, intact through REST's URL
+    # decoding and SOAP's XML escaping (%22 is relevance's quote escape).
+    "special_chars": (("a+b & c \" <q> 's' \\ / ?x=1#y",), "string", False),
+    "floating_point_forms": (
+        (
+            "0.000000025",
+            "100.0",
+            "0.0",
+            "-0.5",
+            "-1.0e+300",
+            "1234567.0",
+            "123456789012.5",
+            "1.0e+100",
+        ),
+        "floating point",
+        True,
+    ),
 }
 _TYPED_CASES = [(s, i, k) for s, i in zip(SOURCES, SOURCE_IDS, strict=True) for k in TYPED] + [
     (s, i, k)
@@ -139,6 +159,50 @@ async def test_success_cases(source: tuple[str, str], key: str, recording_transp
     answers, type_, plural = SUCCESS[key]
     assert result.ok, result.error
     assert (result.answers, result.type, result.plural) == (answers, type_, plural)
+
+
+# Evaluation errors captured with Explorer reachable (REST via Explorer only).
+ERRORS_WITH_EXPLORER = {
+    "error_too_large": "The expression could not be evaluated: class TooLargeForStandardNotation",
+    "error_no_string": 'The operator "string" is not defined.',
+    "error_nonexistent": "Singular expression refers to nonexistent object.",
+}
+_WITH_EXPLORER = [
+    pytest.param(s, id=i) for s, i in zip(SOURCES, SOURCE_IDS, strict=True) if s != ("rest", "")
+]
+
+
+@pytest.mark.parametrize("source", _WITH_EXPLORER)
+@pytest.mark.parametrize("key", sorted(ERRORS_WITH_EXPLORER))
+async def test_evaluation_errors(
+    source: tuple[str, str], key: str, recording_transport: type
+) -> None:
+    # Web Reports sends an empty <FloatingPoint> before the error for
+    # error_too_large: the error wins over partial results.
+    result = await _from_source(source, key, recording_transport)
+    assert result.error is not None
+    assert (result.error.kind, result.error.message) == (
+        "session_relevance",
+        ERRORS_WITH_EXPLORER[key],
+    )
+    assert result.answers == ()
+
+
+@pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
+async def test_gather_url_and_deployment_id_fixtures_agree(
+    source: tuple[str, str], recording_transport: type
+) -> None:
+    # A consistency guard, not a server check: the capture script makes the
+    # captured id the sha256 of the redacted gather URL (the live check is
+    # test_live_deployment_id_matches_local_hash). What this pins offline is
+    # that the local fallback, which hashes the gather URL itself, gives the
+    # id the server-side hash gives, from the same fixtures.
+    gather = await _from_source(source, "gather_url_hash_check", recording_transport)
+    deployment = await _from_source(source, "deployment_id", recording_transport)
+    local = deployment_id_from_hashes(
+        hashlib.sha256(str(u).encode()).hexdigest() for u in gather.answers
+    )
+    assert deployment_id_from_hashes(deployment.answers) == local == DEPLOYMENT_HASH
 
 
 @pytest.mark.parametrize("source", SOURCES, ids=SOURCE_IDS)
