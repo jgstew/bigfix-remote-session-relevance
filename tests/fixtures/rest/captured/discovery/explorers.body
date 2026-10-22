@@ -1,0 +1,11 @@
+<BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd">
+<Explorer Resource="https://192.0.2.1:52311/api/explorer/localhost">
+<URL>https://ROOTSERVER:9383</URL>
+</Explorer>
+<Explorer Resource="https://192.0.2.1:52311/api/explorer/localhost">
+<URL>https://ROOTSERVER:9383</URL>
+</Explorer>
+<Explorer Resource="https://192.0.2.1:52311/api/explorer/bigfix.example.com">
+<URL>https://bigfix.example.com:9383</URL>
+</Explorer>
+</BESAPI>

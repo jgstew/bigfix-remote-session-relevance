@@ -776,8 +776,9 @@ def _lab(
     return factory, seen
 
 
-async def test_probe_adds_the_servers_the_root_server_lists() -> None:
-    factory, seen = _lab()
+@pytest.mark.parametrize("state", ["", "via_explorer__"], ids=["no_explorer", "explorer"])
+async def test_probe_adds_the_servers_the_root_server_lists(state: str) -> None:
+    factory, seen = _lab(f"{state}explorers", f"{state}webreports")
     results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
     listed = [(r.backend, r.server, r.status) for r in results if r.listed]
     # bigfix.example.com:9383 is the Explorer candidate already tried: not again.
@@ -823,10 +824,9 @@ async def test_probe_listed_servers_ask_the_same_trust_policy() -> None:
     assert all(trust is marker for _, trust in trusts)
 
 
-async def test_probe_without_master_operator_says_so_on_the_rest_result() -> None:
-    factory, seen = _lab(
-        explorers="via_explorer__explorers_403", webreports="via_explorer__webreports_403"
-    )
+@pytest.mark.parametrize("state", ["", "via_explorer__"], ids=["no_explorer", "explorer"])
+async def test_probe_without_master_operator_says_so_on_the_rest_result(state: str) -> None:
+    factory, seen = _lab(f"{state}explorers_403", f"{state}webreports_403")
     results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
     assert not any(r.listed for r in results)
     rest = next(r for r in results if r.backend == "rest")

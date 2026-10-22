@@ -69,6 +69,8 @@ field differ.
   entry is `<Explorer Resource="…"><URL>https://HOST:9383</URL></Explorer>` /
   `<WebReports><URL>http://HOST:888</URL></WebReports>`, and the root
   server's own Explorer was listed twice, under its short machine name.
+  The lists are the same with Explorer running or stopped: they are what is
+  registered, not what is up.
   The `?output=json` Web Reports form also carries each server's `token`, so
   only XML is requested. `evaluate()` never uses these lists.
 - Explorer extras use the same `application/json+relevance` request, with no

@@ -10,10 +10,14 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 
 from bigfix_remote_session_relevance.backends.rest import RestBackend, parse_registered_urls
 
 CAPTURED = Path(__file__).parent.parent / "fixtures" / "rest" / "captured" / "discovery"
+# (observed) The lists are the same whether Explorer is reachable or not:
+# they are what is registered, not what is up.
+STATES = pytest.mark.parametrize("state", ["", "via_explorer__"], ids=["no_explorer", "explorer"])
 
 
 def _captured(key: str) -> httpx.Response:
@@ -24,14 +28,16 @@ def _captured(key: str) -> httpx.Response:
     )
 
 
-def test_parse_explorers_keeps_order_and_drops_the_repeated_entry() -> None:
+@STATES
+def test_parse_explorers_keeps_order_and_drops_the_repeated_entry(state: str) -> None:
     # (observed) The root server lists its own Explorer twice.
-    urls = parse_registered_urls(_captured("via_explorer__explorers"), "Explorer", "rest")
+    urls = parse_registered_urls(_captured(f"{state}explorers"), "Explorer", "rest")
     assert urls == ["https://ROOTSERVER:9383", "https://bigfix.example.com:9383"]
 
 
-def test_parse_web_reports_keeps_the_http_scheme_and_port() -> None:
-    urls = parse_registered_urls(_captured("via_explorer__webreports"), "WebReports", "rest")
+@STATES
+def test_parse_web_reports_keeps_the_http_scheme_and_port(state: str) -> None:
+    urls = parse_registered_urls(_captured(f"{state}webreports"), "WebReports", "rest")
     assert urls == ["http://bigfix.example.com:888"]
 
 
@@ -44,8 +50,9 @@ def test_the_json_form_lists_the_same_explorers() -> None:
     )
 
 
-def test_parse_forbidden_is_a_permission_error() -> None:
-    for key in ("via_explorer__explorers_403", "via_explorer__webreports_403"):
+@STATES
+def test_parse_forbidden_is_a_permission_error(state: str) -> None:
+    for key in (f"{state}explorers_403", f"{state}webreports_403"):
         error = parse_registered_urls(_captured(key), "Explorer", "rest")
         assert not isinstance(error, list)
         assert (error.kind, error.code, error.http_status) == (
@@ -69,11 +76,12 @@ def test_parse_skips_entries_without_a_url() -> None:
     assert parse_registered_urls(httpx.Response(200, text=body), "Explorer", "rest") == []
 
 
-async def test_registered_servers_reads_both_lists_as_xml() -> None:
+@STATES
+async def test_registered_servers_reads_both_lists_as_xml(state: str) -> None:
     seen: list[str] = []
     routes = {
-        "/api/explorers": "via_explorer__explorers",
-        "/api/webreports": "via_explorer__webreports",
+        "/api/explorers": f"{state}explorers",
+        "/api/webreports": f"{state}webreports",
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -95,9 +103,10 @@ async def test_registered_servers_reads_both_lists_as_xml() -> None:
     ]
 
 
-async def test_registered_servers_forbidden_is_an_error_not_a_raise() -> None:
+@STATES
+async def test_registered_servers_forbidden_is_an_error_not_a_raise(state: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return _captured("via_explorer__explorers_403")
+        return _captured(f"{state}explorers_403")
 
     backend = RestBackend(
         "bf", username="op", password="pw", transport=httpx.MockTransport(handler)
@@ -119,3 +128,19 @@ async def test_registered_servers_maps_a_connection_failure() -> None:
         found = await backend.registered_servers()
     assert not isinstance(found, list)
     assert found.kind == "connection"
+
+
+def test_parse_ignores_layout_whitespace() -> None:
+    # The 200 captures were pasted from a browser, so their whitespace is not
+    # the wire's. This is the root server's usual layout (see clientquery/).
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>\r\n'
+        '<BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+        'xsi:noNamespaceSchemaLocation="BESAPI.xsd">\r\n'
+        '\t<Explorer Resource="https://192.0.2.1:52311/api/explorer/localhost">\r\n'
+        "\t\t<URL>\r\n\t\t\thttps://ROOTSERVER:9383\r\n\t\t</URL>\r\n"
+        "\t</Explorer>\r\n"
+        "</BESAPI>\r\n"
+    )
+    response = httpx.Response(200, text=body, headers={"content-type": "application/xml"})
+    assert parse_registered_urls(response, "Explorer", "rest") == ["https://ROOTSERVER:9383"]
