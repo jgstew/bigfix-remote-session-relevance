@@ -18,6 +18,11 @@ was in: the committed REST captures without a prefix were taken with no
 Explorer, the ``via_explorer__`` ones with Explorer. Capture into a scratch
 ``--out`` and copy across, rather than overwriting the other state's files.
 
+REST connections also GET the root server's lists of registered Explorer
+and Web Reports servers (``REST_GETS``, XML) into ``rest/captured/discovery/``.
+A 200 is written as ``<case>``, anything else as ``<case>_<status>``: these
+need a master operator, and the 403 an operator gets is worth keeping too.
+
 Redaction: session tokens, IPv4 addresses, configured hosts, the gather URL
 host and every configured username/password are replaced, and every 64-hex
 value (the deployment hash) becomes the sha256 of REDACTED_GATHER, which is
@@ -39,6 +44,8 @@ import re
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import httpx
 
 from bigfix_remote_session_relevance import KnownCerts, TrustStore, load_config
 from bigfix_remote_session_relevance.backends.registry import backend_from_config
@@ -108,6 +115,9 @@ QUERIES = {
     "error_no_string": "(bes sites) whose (master site flag of it)",
     "error_nonexistent": '"3 days 04:05:06" as time interval',
 }
+# Root server REST lists that --setup reads; never their JSON forms, whose
+# Web Reports entries carry each server's token.
+REST_GETS = {"explorers": "/api/explorers", "webreports": "/api/webreports"}
 # Probe literals redact() would take for an IPv4 address, kept only in the
 # body of their own case and only as a whole value.
 PRESERVED = {"version_four_part": ("11.0.7.48",)}
@@ -118,13 +128,21 @@ _HASH_RE = re.compile(r"\b[0-9a-f]{64}\b")
 
 async def capture(
     conn: ConnectionConfig, trust: TrustStore, only: set[str] | None = None
-) -> dict[str, SessionRelevanceResult]:
-    results: dict[str, SessionRelevanceResult] = {}
+) -> dict[str, SessionRelevanceResult | httpx.Response]:
+    results: dict[str, SessionRelevanceResult | httpx.Response] = {}
     async with backend_from_config(conn, trust=trust) as backend:
         for key, session_relevance in QUERIES.items():
             # The gather URL always: its host must be redacted from the rest.
             if only is None or key in only or key == "gather_url_hash_check":
                 results[key] = await backend.evaluate(session_relevance)
+        for key, url in REST_GETS.items() if conn.backend == "rest" else ():
+            if only is None or key in only:
+                # Through _with_trust, so auth and pinning are the library's own.
+                response = await backend._with_trust(lambda c, url=url: c.get(url))
+                if isinstance(response, httpx.Response):
+                    results[key] = response
+                else:
+                    print(f"{conn.name} {key}: no response ({response})", file=sys.stderr)
     wanted = only is None or "bad_password" in only
     if wanted and conn.backend in ("rest", "explorer", "webreports") and conn.auth == "basic":
         # A fresh backend, so no session cookie or token from above is reused.
@@ -142,7 +160,7 @@ def main() -> int:
     parser.add_argument("--only", action="append", metavar="CASE", help="only this case")
     args = parser.parse_args()
     only = set(args.only) if args.only else None
-    if only and (unknown := only - set(QUERIES) - {"bad_password"}):
+    if only and (unknown := only - set(QUERIES) - set(REST_GETS) - {"bad_password"}):
         parser.error(f"unknown cases: {', '.join(sorted(unknown))}")
 
     config = load_config(args.config)
@@ -161,6 +179,8 @@ def main() -> int:
         secrets.update(filter(None, (conn.username, conn.resolve_password(), conn.resolve_token())))
     for results in captured.values():
         gather = results.get("gather_url_hash_check")
+        if not isinstance(gather, SessionRelevanceResult):
+            gather = None
         for url in gather.answers if gather and gather.ok else ():
             hosts.add(urlsplit(str(url)).hostname or "")
     fake_hash = hashlib.sha256(REDACTED_GATHER.encode()).hexdigest()
@@ -170,6 +190,12 @@ def main() -> int:
         out_dir.mkdir(parents=True, exist_ok=True)
         for key, result in results.items():
             if only is not None and key not in only:
+                continue
+            if isinstance(result, httpx.Response):
+                body = _HASH_RE.sub(fake_hash, _redact(result.text, hosts, secrets, key))
+                name = key if result.status_code == 200 else f"{key}_{result.status_code}"
+                print(f"{conn.name:<24} {name:<24} {result.status_code}")
+                _write(out_dir / "discovery", name, body, result)
                 continue
             if conn.backend == "saas" and key in _SAAS_NOT_WRITTEN:
                 print(f"{conn.name} {key}: not written for BigFix SaaS", file=sys.stderr)
@@ -187,6 +213,13 @@ def main() -> int:
             (out_dir / f"{key}.meta.json").write_text(json.dumps(meta) + "\n")
     print(f"wrote fixtures under {args.out}; review the diff before committing")
     return 0
+
+
+def _write(out_dir: Path, name: str, body: str, response: httpx.Response) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    meta = {"status": response.status_code, "content_type": response.headers.get("content-type")}
+    (out_dir / f"{name}.body").write_text(body)
+    (out_dir / f"{name}.meta.json").write_text(json.dumps(meta) + "\n")
 
 
 def _redact(text: str, hosts: set[str], secrets: set[str], case: str) -> str:
@@ -213,7 +246,7 @@ def _redact(text: str, hosts: set[str], secrets: set[str], case: str) -> str:
 
 async def _capture_all(
     connections: tuple[ConnectionConfig, ...], trust: TrustStore, only: set[str] | None
-) -> dict[str, dict[str, SessionRelevanceResult]]:
+) -> dict[str, dict[str, SessionRelevanceResult | httpx.Response]]:
     found = await asyncio.gather(*(capture(c, trust, only) for c in connections))
     return {c.name: r for c, r in zip(connections, found, strict=True)}
 

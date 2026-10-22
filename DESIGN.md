@@ -59,6 +59,18 @@ field differ.
 - **(observed)** Bad credentials: `401 text/plain "HTTP 401: Unauthorized"`.
   A session cookie from an earlier login is honoured even when later
   requests carry the wrong password.
+- **Registered servers (setup only).** `RestBackend.registered_servers()`
+  GETs `/api/explorers` and `/api/webreports` (XML) and returns
+  `(backend, url)` pairs; `--setup` probes the ones it has not already tried.
+  **(observed, 11.0.7)** Both need a master operator: anyone else gets `403
+  text/plain "Action requires master operator privileges."`
+  (`authentication` / `permission_denied`). The list endpoint is the plural
+  `/api/explorers` (`/api/explorer/{name}` is one server's details). Each
+  entry is `<Explorer Resource="…"><URL>https://HOST:9383</URL></Explorer>` /
+  `<WebReports><URL>http://HOST:888</URL></WebReports>`, and the root
+  server's own Explorer was listed twice, under its short machine name.
+  The `?output=json` Web Reports form also carries each server's `token`, so
+  only XML is requested. `evaluate()` never uses these lists.
 - Explorer extras use the same `application/json+relevance` request, with no
   fallback. **(observed)** With no Explorer available: `503 text/plain "Cannot
   perform relevance query evaluation at this time because there is no reachable

@@ -728,3 +728,179 @@ def test_run_setup_saas_only_rejects_an_on_prem_host(tmp_path: Path) -> None:
     )
     assert code == EXIT_USAGE
     assert len(ask.prompts) == 1
+
+
+# -- Explorer / Web Reports listed by the root server ----------------------------------
+
+DISCOVERY = Path(__file__).parent.parent / "fixtures" / "rest" / "captured" / "discovery"
+
+
+def _discovery(key: str) -> httpx.Response:
+    meta = json.loads((DISCOVERY / f"{key}.meta.json").read_text())
+    headers = {"content-type": meta["content_type"]} if meta["content_type"] else {}
+    return httpx.Response(
+        meta["status"], text=(DISCOVERY / f"{key}.body").read_text(), headers=headers
+    )
+
+
+def _rest_ok() -> httpx.Response:
+    return httpx.Response(200, json={"result": [D1], "plural": False, "type": "string"})
+
+
+def _lab(
+    explorers: str = "via_explorer__explorers",
+    webreports: str = "via_explorer__webreports",
+    rest: httpx.Response | None = None,
+) -> tuple[Any, list[str]]:
+    """A root server at bigfix.example.com listing the lab's captured servers.
+
+    Every probe answers 401 except REST (and the discovery GETs it serves);
+    ``seen`` records each request as ``backend scheme://host:port path``.
+    """
+    seen: list[str] = []
+
+    def factory(backend: str, server: str) -> httpx.AsyncBaseTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            where = f"{request.url.scheme}://{request.url.host}:{request.url.port}"
+            seen.append(f"{backend} {where} {request.url.path}")
+            if backend == "rest" and request.url.path == "/api/explorers":
+                return _discovery(explorers)
+            if backend == "rest" and request.url.path == "/api/webreports":
+                return _discovery(webreports)
+            if backend == "rest":
+                return rest or _rest_ok()
+            return httpx.Response(401, text="no")
+
+        return httpx.MockTransport(handler)
+
+    return factory, seen
+
+
+async def test_probe_adds_the_servers_the_root_server_lists() -> None:
+    factory, seen = _lab()
+    results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
+    listed = [(r.backend, r.server, r.status) for r in results if r.listed]
+    # bigfix.example.com:9383 is the Explorer candidate already tried: not again.
+    assert listed == [
+        ("explorer", "rootserver", "auth"),
+        ("webreports", "http://bigfix.example.com:888", "auth"),
+    ]
+    explorer_probes = [s for s in seen if s.startswith("explorer ")]
+    assert explorer_probes.count("explorer https://bigfix.example.com:9383 /api/relevance") == 1
+    assert "explorer https://rootserver:9383 /api/relevance" in explorer_probes
+    # The host's own candidates are unchanged and come first.
+    assert [(r.backend, r.server) for r in results if not r.listed][:2] == [
+        ("explorer", "bigfix.example.com"),
+        ("rest", "bigfix.example.com"),
+    ]
+
+
+async def test_probe_listed_servers_ask_the_same_trust_policy() -> None:
+    # Each listed endpoint is built with the trust the wizard passed in, so a
+    # self-signed certificate there gets the same pin-it prompt.
+    from bigfix_remote_session_relevance.setup_wizard import BACKEND_CLASSES
+
+    trusts: list[tuple[str, Any]] = []
+    factory, _ = _lab()
+    marker = object()
+    real = dict(BACKEND_CLASSES)
+
+    def spy(name: str) -> Any:
+        def build(server: str, **kwargs: Any) -> Any:
+            trusts.append((server, kwargs["trust"]))
+            return real[name](server, **kwargs)
+
+        return build
+
+    try:
+        for name in real:
+            BACKEND_CLASSES[name] = spy(name)  # type: ignore[assignment]
+        await probe("bigfix.example.com", "op", "pw", marker, transport_factory=factory)  # type: ignore[arg-type]
+    finally:
+        BACKEND_CLASSES.update(real)
+    assert ("rootserver", marker) in trusts
+    assert ("http://bigfix.example.com:888", marker) in trusts
+    assert all(trust is marker for _, trust in trusts)
+
+
+async def test_probe_without_master_operator_says_so_on_the_rest_result() -> None:
+    factory, seen = _lab(
+        explorers="via_explorer__explorers_403", webreports="via_explorer__webreports_403"
+    )
+    results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
+    assert not any(r.listed for r in results)
+    rest = next(r for r in results if r.backend == "rest")
+    assert rest.status == "ok"
+    assert "master operator" in rest.message
+    assert not [s for s in seen if "rootserver" in s or ":888" in s]
+
+
+async def test_probe_does_not_ask_for_lists_when_rest_failed() -> None:
+    factory, seen = _lab(rest=httpx.Response(401, text="no"))
+    results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
+    assert not any(r.listed for r in results)
+    assert not [s for s in seen if s.endswith(("/api/explorers", "/api/webreports"))]
+
+
+async def test_probe_lists_only_requested_backends() -> None:
+    factory, seen = _lab()
+    results = await probe(
+        "bigfix.example.com",
+        "op",
+        "pw",
+        None,
+        backends=("rest", "explorer"),
+        transport_factory=factory,
+    )
+    assert [(r.backend, r.server) for r in results if r.listed] == [("explorer", "rootserver")]
+    assert not [s for s in seen if s.startswith("webreports ")]
+
+
+async def test_probe_rest_only_never_asks_for_lists() -> None:
+    factory, seen = _lab()
+    await probe(
+        "bigfix.example.com", "op", "pw", None, backends=("rest",), transport_factory=factory
+    )
+    assert not [s for s in seen if s.endswith(("/api/explorers", "/api/webreports"))]
+
+
+async def test_probe_listed_server_matching_a_given_port_is_not_probed_twice() -> None:
+    # The user typed the port of the Web Reports the root server also lists:
+    # its http candidate is that same address, so it is probed once.
+    factory, seen = _lab()
+    results = await probe("bigfix.example.com:888", "op", "pw", None, transport_factory=factory)
+    assert "explorer https://rootserver:9383 /api/relevance" in seen  # the lists were read
+    assert [s for s in seen if s.startswith("webreports http://")] == [
+        "webreports http://bigfix.example.com:888 /webreports/soap"
+    ]
+    assert not [r for r in results if r.listed and r.backend == "webreports"]
+
+
+def test_setup_marks_and_saves_a_listed_server(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "c.toml"
+    results = [
+        ProbeResult("rest", "bf.example.com", "ok", D1, ""),
+        ProbeResult("explorer", "explorer2.example.com", "ok", D1, "", listed=True),
+    ]
+    ask = _answers("bf.example.com", "op", "f", "y", "", "y", "")
+    code = run_setup(path, input_fn=ask, getpass_fn=lambda p: "pw", probe_fn=_fake_probe(results))
+    assert code == 0
+    err = capsys.readouterr().err
+    line = next(x for x in err.splitlines() if "explorer2.example.com" in x)
+    assert "listed by the root server" in line
+    saved = {c.name: c for c in load_config(path).connections}
+    assert saved["explorer2-explorer"].server == "explorer2.example.com"
+
+
+def test_setup_shows_the_note_on_a_working_rest_result(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    note = "listing other Explorer and Web Reports servers needs a master operator"
+    results = [ProbeResult("rest", "bf.example.com", "ok", D1, note)]
+    ask = _answers("bf.example.com", "op", "f", "n")
+    run_setup(
+        tmp_path / "c.toml", input_fn=ask, getpass_fn=lambda p: "pw", probe_fn=_fake_probe(results)
+    )
+    assert note in capsys.readouterr().err

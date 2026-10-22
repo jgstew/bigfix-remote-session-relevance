@@ -48,6 +48,17 @@ backend over https, plus Web Reports over http. One entered as `https://`
 is probed only over https (Web Reports still on 443 and 8083), and
 `http://` probes only Web Reports.
 
+When the REST API answers, setup also asks the root server for the Explorer
+and Web Reports servers registered with it (`/api/explorers`,
+`/api/webreports`) and probes those too, so ones on other machines are
+found. They are marked "listed by the root server", go through the same
+certificate prompts, and are offered for saving like the rest; one that is
+already among the host's own candidates is not probed again. The root
+server answers these lists only for a master operator. For anyone else,
+setup says so on the REST line and carries on. The root server may list a
+short machine name that does not resolve from where you run setup; that
+entry then shows as unreachable.
+
 For BigFix SaaS, enter `login.bigfix.com` (or `eulogin.bigfix.com`) as the
 host, then your email and password; a TOTP code is asked for only if your
 account uses MFA. Setup signs in once and saves one connection per BigFix
