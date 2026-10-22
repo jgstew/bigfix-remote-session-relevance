@@ -42,7 +42,11 @@ uvx bigfix-remote-session-relevance --setup
 The wizard asks for a host, username and password, probes the REST API
 (52311), Explorer (9383) and Web Reports (443/8083/80/8080), pins
 certificates after showing their fingerprints, and writes
-`~/.bigfix/.remote_session_connections.toml` (mode 0600).
+`~/.bigfix/.remote_session_connections.toml` (mode 0600). A host entered
+with a port (`bes-root.local:52311`) is probed only on that port: every
+backend over https, plus Web Reports over http. One entered as `https://`
+is probed only over https (Web Reports still on 443 and 8083), and
+`http://` probes only Web Reports.
 
 For BigFix SaaS, enter `login.bigfix.com` (or `eulogin.bigfix.com`) as the
 host, then your email and password; a TOTP code is asked for only if your
