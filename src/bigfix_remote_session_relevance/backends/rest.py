@@ -35,12 +35,15 @@ import time
 import urllib.parse
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
+from xml.etree.ElementTree import ParseError
 
+import defusedxml.ElementTree as SafeET
 import httpx
+from defusedxml import DefusedXmlException
 
 from ..result import ResultError, SessionRelevanceResult
 from ._parsing import parse_session_relevance_response
-from .base import Backend
+from .base import Backend, error_from_status
 from .client_query import (
     ClientQueryResponse,
     ClientQueryRow,
@@ -58,6 +61,13 @@ _NO_EXPLORER_RE = re.compile(r"no reachable BigFix Explorer", re.IGNORECASE)
 _RETRY_JSON_RE = re.compile(r"character which is not allowed|invalid json", re.IGNORECASE)
 # A client query call: (query id, rows so far), or the server's error.
 _Outcome = tuple[int | None, list[ClientQueryRow]] | ResultError
+# The root server's lists of the servers registered with it: (backend, path,
+# element). XML, not ?output=json: the JSON Web Reports entries carry each
+# server's token, which the library has no use for.
+REGISTERED_SERVER_LISTS = (
+    ("explorer", "/api/explorers", "Explorer"),
+    ("webreports", "/api/webreports", "WebReports"),
+)
 
 
 def encode_session_relevance(session_relevance: str) -> str:
@@ -182,10 +192,58 @@ class RestBackend(Backend):
             elapsed_ms=round((time.perf_counter() - start) * 1000, 3),
         )
 
+    async def registered_servers(self) -> list[tuple[str, str]] | ResultError:
+        """``(backend, url)`` for each Explorer and Web Reports server the root lists.
+
+        Opt-in, for ``--setup`` to find servers that are not on the root
+        server itself. Both lists need a master operator (anyone else gets
+        403 "Action requires master operator privileges.", reported as
+        ``authentication`` / ``permission_denied``). An error is returned
+        only when both lists failed. The URLs are as the root server has
+        them, e.g. a short machine name that may not resolve here.
+        """
+
+        async def _op(client: httpx.AsyncClient) -> list[tuple[str, str]] | ResultError:
+            found: list[tuple[str, str]] = []
+            errors: list[ResultError] = []
+            for backend, path, element in REGISTERED_SERVER_LISTS:
+                urls = parse_registered_urls(await client.get(path), element, self.name)
+                if isinstance(urls, ResultError):
+                    errors.append(urls)
+                else:
+                    found.extend((backend, url) for url in urls)
+            # One list failing (e.g. a 500) does not lose the other.
+            return errors[0] if errors and len(errors) == len(REGISTERED_SERVER_LISTS) else found
+
+        return await self._with_trust(_op)
+
     async def _post_json(self, client: httpx.AsyncClient, body: dict[str, Any]) -> httpx.Response:
         return await client.post(
             "/api/query", content=json.dumps(body), headers={"Content-Type": JSON_RELEVANCE}
         )
+
+
+def parse_registered_urls(
+    response: httpx.Response, element: str, backend: str
+) -> list[str] | ResultError:
+    """The ``<element><URL>`` texts of a BESAPI list, in order, each once.
+
+    (observed) The root server can list its own Explorer twice.
+    """
+    if response.status_code != 200:
+        return error_from_status(response, backend)
+    try:
+        root = SafeET.fromstring(response.text)
+    except (ParseError, DefusedXmlException) as exc:
+        return ResultError(
+            kind="response_format",
+            backend=backend,
+            http_status=response.status_code,
+            message=f"invalid XML: {exc}",
+            detail=response.text[:500],
+        )
+    urls = ((entry.findtext("URL") or "").strip() for entry in root.iter(element))
+    return list(dict.fromkeys(url for url in urls if url))
 
 
 def _no_explorer(response: httpx.Response) -> bool:

@@ -31,3 +31,19 @@ hand (the capture script only sends session relevance). The answering
 computer is redacted to id `1000001` / `COMPUTER-1` and the server address
 to `bigfix.example.com`. The 403 permission case has no capture yet; its
 test uses a synthetic body.
+
+`rest/captured/discovery/` are the root server's lists of registered
+Explorer and Web Reports servers (`/api/explorers`, `/api/webreports`,
+11.0.7), in both REST states: unprefixed with Explorer stopped,
+`via_explorer__` with it running. The lists did not change with Explorer's
+state, since they show what is registered, not what is up. The 200s need a master operator
+and were **pasted by hand** from a browser, so their content is real but
+their whitespace and line endings are not the wire's, and their content
+type was not recorded (`null`); `test_parse_ignores_layout_whitespace`
+covers the server's usual layout instead. The lab's machine name is
+redacted to `ROOTSERVER`, its FQDN to `bigfix.example.com` and its IP by
+`redact()`; the repeated Explorer entry is real. `via_explorer__explorers_json`
+is the `?output=json` form, kept to show it lists the same URLs. The Web
+Reports JSON form is not committed because it carries each server's token.
+The `_403` files are exact: `scripts/capture_fixtures.py --only explorers
+--only webreports` as a non-master operator.

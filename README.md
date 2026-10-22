@@ -48,6 +48,21 @@ backend over https, plus Web Reports over http. One entered as `https://`
 is probed only over https (Web Reports still on 443 and 8083), and
 `http://` probes only Web Reports.
 
+When the REST API answers, setup also asks the root server for the Explorer
+and Web Reports servers registered with it (`/api/explorers`,
+`/api/webreports`), so ones on other machines can be found. It shows the
+ones it has not already tried and asks before sending your username and
+password to them (default no). Those reached over `http://` are marked
+cleartext. If you agree, they are probed with the same certificate prompts,
+marked "listed by the root server", and offered for saving like the rest.
+The root server answers these lists only for a master operator. For anyone
+else, setup says so on the REST line and carries on. The lists name a
+server as the root server knows it, which can be a short machine name that
+does not resolve from where you run setup (it then shows as unreachable),
+or the root server's own Explorer under a second name. Setup that probes
+only Explorer or Web Reports (`run_setup(backends=...)` without `rest`)
+never reads the lists.
+
 For BigFix SaaS, enter `login.bigfix.com` (or `eulogin.bigfix.com`) as the
 host, then your email and password; a TOTP code is asked for only if your
 account uses MFA. Setup signs in once and saves one connection per BigFix

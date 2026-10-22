@@ -22,12 +22,13 @@ import sys
 from collections.abc import Callable, Collection, Coroutine
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 from .backends.base import Backend, TrustPolicy
 from .backends.registry import BACKEND_CLASSES
+from .backends.rest import RestBackend
 from .backends.saas import SaasBackend
 from .config import ConnectionConfig, load_config, resolve_config_path, save_connection
 from .deployment import (
@@ -38,11 +39,21 @@ from .deployment import (
 from .escapes import escape_controls
 from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
-from .server_address import normalize_server, saas_api_address, split_server
+from .result import ResultError
+from .server_address import (
+    DEFAULT_PORTS,
+    ServerAddress,
+    normalize_server,
+    saas_api_address,
+    split_server,
+)
 from .trust import CertInfo, TrustStore
 
 InputFn = Callable[[str], str]
 ProbeTransportFactory = Callable[[str, str], httpx.AsyncBaseTransport | None]
+# Asked with the root server's listed (backend, server) pairs not yet tried;
+# True sends the same credentials to them.
+ConfirmListedFn = Callable[[list[tuple[str, str]]], bool]
 ProbeFn = Callable[[str, str, str, TrustPolicy | None], Coroutine[Any, Any, list["ProbeResult"]]]
 SaasProbeFn = Callable[[str, str, str, InputFn], Coroutine[Any, Any, list["ProbeResult"]]]
 
@@ -61,6 +72,7 @@ class ProbeResult:
     deployment_id: str | None
     message: str
     sid: str | None = None  # BigFix SaaS server, when the account has several
+    listed: bool = False  # found in the root server's lists, not from the host given
 
 
 def is_saas_host(host: str) -> bool:
@@ -105,10 +117,18 @@ async def probe(
     *,
     backends: Collection[str] | None = None,
     transport_factory: ProbeTransportFactory | None = None,
+    confirm_listed: ConfirmListedFn | None = None,
 ) -> list[ProbeResult]:
-    async def one(backend_name: str, server: str) -> ProbeResult:
+    """Probe the host's candidates, then the servers its root server lists.
+
+    The listed servers are probed only if ``confirm_listed`` agrees: the
+    root server's lists are not the user's word, and a listed server may be
+    anywhere, over http.
+    """
+
+    def build(backend_name: str, server: str) -> Backend:
         transport = transport_factory(backend_name, server) if transport_factory else None
-        backend = BACKEND_CLASSES[backend_name](
+        return BACKEND_CLASSES[backend_name](
             server,
             username=username,
             password=password,
@@ -119,7 +139,9 @@ async def probe(
             retries=0,
             transport=transport,
         )
-        async with backend:
+
+    async def one(backend_name: str, server: str) -> ProbeResult:
+        async with build(backend_name, server) as backend:
             return await _probe_one(backend, server)
 
     tried = [(b, s) for b, s in candidates(host) if backends is None or b in backends]
@@ -129,7 +151,55 @@ async def probe(
     working = [r for r in web_reports if r.status in SAVEABLE]
     if web_reports:
         results.append(working[0] if working else web_reports[0])
-    return results
+
+    rest = next((r for r in results if r.backend == "rest" and r.status == "ok"), None)
+    wanted = {"explorer", "webreports"} if backends is None else set(backends)
+    if rest is None or not wanted & {"explorer", "webreports"}:
+        return results
+    async with cast(RestBackend, build("rest", rest.server)) as root:
+        listed = await root.registered_servers()
+    if isinstance(listed, ResultError):
+        note = (
+            "listing other Explorer and Web Reports servers needs a master operator"
+            if listed.code == "permission_denied"
+            else f"could not list other Explorer and Web Reports servers: {listed.message}"
+        )
+        results[results.index(rest)] = replace(rest, message=note)
+        return results
+    # Compared as addresses, so "bf" and "https://bf:9383" are one Explorer.
+    seen = {(b, normalize_server(s, b)) for b, s in tried}
+    extra: list[tuple[str, str]] = []
+    for backend_name, url in listed:
+        try:
+            address = normalize_server(url, backend_name)
+        except ConfigError:
+            continue  # not a usable address; nothing to probe
+        if backend_name in wanted and (backend_name, address) not in seen:
+            seen.add((backend_name, address))
+            extra.append((backend_name, _config_server(backend_name, address)))
+    if not extra:
+        return results
+    if confirm_listed is None or not confirm_listed(extra):
+        note = f"the root server lists {len(extra)} other servers, not probed"
+        results[results.index(rest)] = replace(rest, message=note)
+        return results
+    found = await asyncio.gather(*(one(b, s) for b, s in extra))
+    return [*results, *(replace(r, listed=True) for r in found)]
+
+
+def confirm_listed_prompt(input_fn: InputFn) -> ConfirmListedFn:
+    """Show the listed servers and ask before the password goes to them."""
+
+    def confirm(listed: list[tuple[str, str]]) -> bool:
+        _say("\nThe root server lists these other servers:")
+        for backend, server in listed:
+            # Server text: the root server's, so escaped like any other.
+            clear = " (cleartext)" if server.startswith("http://") else ""
+            _say(f"  {backend:<10} {escape_controls(server)}{clear}")
+        answer = input_fn("Send the same username and password to them too? [y/N] ")
+        return answer.strip().lower() in ("y", "yes")
+
+    return confirm
 
 
 async def probe_saas(
@@ -253,9 +323,12 @@ def run_setup(
         trust = TrustStore(callback=confirm_cert)
         say(f"Probing {host} ...")
         results = asyncio.run(
-            (probe_fn or functools.partial(probe, backends=backends))(
-                host, username, password, trust
-            )
+            (
+                probe_fn
+                or functools.partial(
+                    probe, backends=backends, confirm_listed=confirm_listed_prompt(input_fn)
+                )
+            )(host, username, password, trust)
         )
     answered_elsewhere: list[str] = []
     if backends is not None:
@@ -268,8 +341,10 @@ def run_setup(
     for r in results:
         dep = f" deployment {r.deployment_id[:12]}…" if r.deployment_id else ""
         # The message can be the server's text; the wizard always talks to a person.
-        note = f" ({escape_controls(r.message)})" if r.message and r.status != "ok" else ""
-        say(f"  {r.backend:<10} {_where(r):<32} {r.status}{dep}{note}")
+        # A working REST result's message is about the root server's lists.
+        note = f" ({escape_controls(r.message)})" if r.message else ""
+        listed = " (listed by the root server)" if r.listed else ""
+        say(f"  {r.backend:<10} {_where(r):<32} {r.status}{dep}{listed}{note}")
     ids = {r.deployment_id for r in results if r.deployment_id}
     if len(ids) == 1 and len(results) > 1:
         say("  The endpoints that answered belong to one deployment.")
@@ -321,6 +396,11 @@ def run_setup(
         ):
             continue
         default_name = _default_name(host, r)
+        # A listed server can shorten to the name just saved (the root's own
+        # Explorer under its machine name): number it rather than replace.
+        base, n = default_name, 2
+        while default_name in saved:
+            default_name, n = f"{base}-{n}", n + 1
         name = input_fn(f"Connection name [{default_name}]: ").strip() or default_name
         replace = False
         if name in existing:
@@ -351,13 +431,22 @@ def run_setup(
     return 0
 
 
+def _config_server(backend: str, address: ServerAddress) -> str:
+    """``server`` as the config would have it: only the non-default parts."""
+    if address.scheme == "http":
+        return address.base_url
+    if address.port != DEFAULT_PORTS[backend]:
+        return address.host_port
+    return f"[{address.host}]" if ":" in address.host else address.host
+
+
 def _where(r: ProbeResult) -> str:
     return f"{r.server} {r.sid}" if r.sid else r.server
 
 
 def _default_name(host: str, r: ProbeResult) -> str:
     if r.backend != "saas":
-        return f"{_short(host)}-{r.backend}"
+        return f"{_short(r.server if r.listed else host)}-{r.backend}"
     region = "-eu" if saas_api_address(normalize_server(host, "saas")).host.startswith("eu") else ""
     return f"bigfix-saas{region}-{r.sid}" if r.sid else f"bigfix-saas{region}"
 

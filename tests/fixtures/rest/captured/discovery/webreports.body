@@ -1,0 +1,5 @@
+<BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd">
+<WebReports>
+<URL>http://bigfix.example.com:888</URL>
+</WebReports>
+</BESAPI>
