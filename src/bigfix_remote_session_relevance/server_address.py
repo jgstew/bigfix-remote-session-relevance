@@ -47,16 +47,33 @@ class ServerAddress:
 def normalize_server(server: str, backend: str) -> ServerAddress:
     if backend not in DEFAULT_PORTS:
         raise ConfigError(f"unknown backend {backend!r}; expected one of {sorted(DEFAULT_PORTS)}")
+    scheme, host, port_text = split_server(server)
+
+    if port_text is None:
+        # An explicit http:// with no port means the http port, not the
+        # backend default, which is an https port.
+        port = 80 if scheme == "http" else DEFAULT_PORTS[backend]
+    else:
+        if not port_text.isdigit() or not 0 < int(port_text) < 65536:
+            raise ConfigError(f"invalid port {port_text!r} in server {server!r}")
+        port = int(port_text)
+
+    return ServerAddress(scheme=scheme or "https", host=host.lower(), port=port)
+
+
+def split_server(server: str) -> tuple[str | None, str, str | None]:
+    """``(scheme, host, port)`` as written; ``None`` for what was left out.
+
+    The host is unbracketed and keeps its case; the port is unchecked text.
+    """
     text = (server or "").strip()
     if not text:
         raise ConfigError("server is empty")
 
-    scheme = "https"
-    explicit_scheme = False
+    scheme = None
     match = _SCHEME_RE.match(text)
     if match:
         scheme = match.group(1).lower()
-        explicit_scheme = True
         text = text[match.end() :]
         if scheme not in _SCHEME_PORTS:
             raise ConfigError(f"unsupported scheme {scheme!r} in server {server!r}")
@@ -73,17 +90,7 @@ def normalize_server(server: str, backend: str) -> ServerAddress:
     host, port_text = _split_host_port(hostport, server)
     if not host:
         raise ConfigError(f"server {server!r} has no host")
-
-    if port_text is None:
-        # An explicit http:// with no port means the http port, not the
-        # backend default, which is an https port.
-        port = 80 if (explicit_scheme and scheme == "http") else DEFAULT_PORTS[backend]
-    else:
-        if not port_text.isdigit() or not 0 < int(port_text) < 65536:
-            raise ConfigError(f"invalid port {port_text!r} in server {server!r}")
-        port = int(port_text)
-
-    return ServerAddress(scheme=scheme, host=host.lower(), port=port)
+    return scheme, host, port_text
 
 
 def _split_host_port(hostport: str, original: str) -> tuple[str, str | None]:

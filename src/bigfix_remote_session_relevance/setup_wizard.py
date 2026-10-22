@@ -38,7 +38,7 @@ from .deployment import (
 from .escapes import escape_controls
 from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
-from .server_address import normalize_server, saas_api_address
+from .server_address import normalize_server, saas_api_address, split_server
 from .trust import CertInfo, TrustStore
 
 InputFn = Callable[[str], str]
@@ -73,14 +73,27 @@ def is_saas_host(host: str) -> bool:
 
 
 def candidates(host: str) -> list[tuple[str, str]]:
-    """Endpoints to try, https and default ports first."""
+    """Endpoints to try, https and default ports first.
+
+    A host given with a scheme or port is tried only as given: the person
+    already said where to look, and appending a default port to it made an
+    invalid address.
+    """
+    scheme, bare, port = split_server(host)
+    if scheme == "http":
+        return [("webreports", host)]
+    if scheme or port:
+        given = [(backend, host) for backend in ("explorer", "rest", "webreports")]
+        # Web Reports is often plain http on its own port (e.g. 8080).
+        return given if scheme else [*given, ("webreports", f"http://{host}")]
+    bare = f"[{bare}]" if ":" in bare else bare  # IPv6
     return [
         ("explorer", host),
         ("rest", host),
         ("webreports", host),
-        ("webreports", f"{host}:8083"),
-        ("webreports", f"http://{host}"),
-        ("webreports", f"http://{host}:8080"),
+        ("webreports", f"{bare}:8083"),
+        ("webreports", f"http://{bare}"),
+        ("webreports", f"http://{bare}:8080"),
     ]
 
 
@@ -203,10 +216,16 @@ def run_setup(
     say = _say
     say(f"Adding BigFix connections to {path}")
     host = input_fn(
-        "BigFix server host name or IP (login.bigfix.com or eulogin.bigfix.com for BigFix SaaS): "
+        "Host name or IP of a BigFix root server, Explorer or Web Reports, with :port if "
+        "not the default (login.bigfix.com or eulogin.bigfix.com for BigFix SaaS): "
     ).strip()
     if not host:
         say("a host is required")
+        return EXIT_USAGE
+    try:
+        normalize_server(host, "rest")  # any backend: this checks the scheme and port
+    except ConfigError as exc:
+        say(str(exc))
         return EXIT_USAGE
     saas = is_saas_host(host)
     # Decided before asking for a password, so nothing is sent to a host that
@@ -281,7 +300,8 @@ def run_setup(
     )
     password_env: str | None = None
     if store.startswith("e"):
-        default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', host.upper()).strip('_')}_PASSWORD"
+        bare = split_server(host)[1].upper()
+        default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', bare).strip('_')}_PASSWORD"
         password_env = input_fn(f"Environment variable name [{default_env}]: ").strip()
         password_env = password_env or default_env
 
@@ -343,8 +363,9 @@ def _default_name(host: str, r: ProbeResult) -> str:
 
 
 def _short(host: str) -> str:
+    host = split_server(host)[1]
     try:
-        ipaddress.ip_address(host.strip("[]"))
+        ipaddress.ip_address(host)
     except ValueError:
         return host.split(".")[0].lower()
     return re.sub(r"[^0-9a-f]+", "-", host.lower()).strip("-")

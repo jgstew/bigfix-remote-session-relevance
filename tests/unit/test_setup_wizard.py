@@ -35,6 +35,44 @@ def test_candidates_prefer_https_and_default_ports() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "host", ["https://bes-root.local:52311", "https://[fe80::1]:8443", "https://bf.example.com"]
+)
+def test_candidates_keep_a_given_https_address(host: str) -> None:
+    # Issue #17: "host:52311" became "[host:52311:8083]" and crashed httpx.
+    assert candidates(host) == [
+        ("explorer", host),
+        ("rest", host),
+        ("webreports", host),
+    ]
+
+
+def test_candidates_also_try_http_web_reports_on_a_given_port() -> None:
+    # Web Reports is often plain http on a non-default port (e.g. 8080).
+    assert candidates("wr.example.com:8080") == [
+        ("explorer", "wr.example.com:8080"),
+        ("rest", "wr.example.com:8080"),
+        ("webreports", "wr.example.com:8080"),
+        ("webreports", "http://wr.example.com:8080"),
+    ]
+
+
+def test_candidates_given_http_is_web_reports_only() -> None:
+    # Like the default candidates, only Web Reports is ever tried over http.
+    assert candidates("http://wr.example.com") == [("webreports", "http://wr.example.com")]
+
+
+def test_candidates_bracket_a_bare_ipv6_address() -> None:
+    assert candidates("fe80::1") == [
+        ("explorer", "fe80::1"),
+        ("rest", "fe80::1"),
+        ("webreports", "fe80::1"),
+        ("webreports", "[fe80::1]:8083"),
+        ("webreports", "http://[fe80::1]"),
+        ("webreports", "http://[fe80::1]:8080"),
+    ]
+
+
 def _answers(*values: str) -> Any:
     it: Iterator[str] = iter(values)
     prompts: list[str] = []
@@ -207,6 +245,27 @@ async def test_probe_classifies_and_picks_first_working_web_reports() -> None:
     # Only the first working Web Reports candidate is offered (https first).
     wr = [r for r in results if r.backend == "webreports"]
     assert [(r.server, r.status) for r in wr] == [("bf:8083", "ok")]
+
+
+async def test_probe_a_host_with_a_port_tries_only_that_port() -> None:
+    # Issue #17: this raised httpx.InvalidURL instead of probing.
+    seen: list[str] = []
+
+    def factory(backend: str, server: str) -> httpx.AsyncBaseTransport:
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(f"{backend} {request.url.scheme}://{request.url.netloc.decode()}")
+            return httpx.Response(401, text="no")
+
+        return httpx.MockTransport(handler)
+
+    results = await probe("bes-root.local:52311", "op", "pw", None, transport_factory=factory)
+    assert sorted(seen) == [
+        "explorer https://bes-root.local:52311",
+        "rest https://bes-root.local:52311",
+        "webreports http://bes-root.local:52311",
+        "webreports https://bes-root.local:52311",
+    ]
+    assert {r.server for r in results} <= {"bes-root.local:52311", "http://bes-root.local:52311"}
 
 
 async def test_probe_reports_auth_failure() -> None:
@@ -439,6 +498,51 @@ def test_setup_saas_totp_prompt_uses_input(tmp_path: Path) -> None:
         == 0
     )
     assert seen == ["654321"]
+
+
+def test_setup_prompt_names_every_kind_of_host(tmp_path: Path) -> None:
+    ask = _answers("")
+    run_setup(tmp_path / "c.toml", input_fn=ask, getpass_fn=lambda p: "pw")
+    (prompt,) = ask.prompts
+    for part in ("root server", "Explorer", "Web Reports", ":port", "login.bigfix.com"):
+        assert part in prompt
+
+
+@pytest.mark.parametrize("host", ["bf:notaport", "bf:99999", "user@bf", "bf/path"])
+def test_setup_rejects_an_unusable_host_before_asking_for_credentials(
+    tmp_path: Path, host: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ask = _answers(host)
+    code = run_setup(
+        tmp_path / "c.toml",
+        input_fn=ask,
+        getpass_fn=lambda p: pytest.fail("asked for a password"),
+        probe_fn=_fake_probe([]),
+    )
+    assert code == EXIT_USAGE
+    assert len(ask.prompts) == 1
+    assert host in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("host", "name", "env"),
+    [
+        ("bes-root.local:52311", "bes-root-rest", "BFRSR_BES_ROOT_LOCAL_PASSWORD"),
+        ("https://BF.example.com", "bf-rest", "BFRSR_BF_EXAMPLE_COM_PASSWORD"),
+        ("[fe80::1]:52311", "fe80-1-rest", "BFRSR_FE80_1_PASSWORD"),
+    ],
+)
+def test_setup_default_names_ignore_a_given_scheme_and_port(
+    tmp_path: Path, host: str, name: str, env: str
+) -> None:
+    path = tmp_path / "c.toml"
+    results = [ProbeResult("rest", host, "ok", D1, "")]
+    ask = _answers(host, "op", "e", "", "y", "")
+    assert (
+        run_setup(path, input_fn=ask, getpass_fn=lambda p: "pw", probe_fn=_fake_probe(results)) == 0
+    )
+    (conn,) = load_config(path).connections
+    assert (conn.name, conn.server, conn.password_env) == (name, host, env)
 
 
 def test_setup_shows_server_text_without_control_characters(
