@@ -75,22 +75,22 @@ def is_saas_host(host: str) -> bool:
 def candidates(host: str) -> list[tuple[str, str]]:
     """Endpoints to try, https and default ports first.
 
-    A host given with a scheme or port is tried only as given: the person
-    already said where to look, and appending a default port to it made an
-    invalid address.
+    A host given with a port is tried only on that port, and one given with
+    a scheme only over that scheme: the person already said where to look,
+    and appending a default port to a given one made an invalid address.
     """
     scheme, bare, port = split_server(host)
     if scheme == "http":
         return [("webreports", host)]
-    if scheme or port:
-        given = [(backend, host) for backend in ("explorer", "rest", "webreports")]
+    given = [(backend, host) for backend in ("explorer", "rest", "webreports")]
+    if port:
         # Web Reports is often plain http on its own port (e.g. 8080).
         return given if scheme else [*given, ("webreports", f"http://{host}")]
     bare = f"[{bare}]" if ":" in bare else bare  # IPv6
+    if scheme:
+        return [*given, ("webreports", f"{bare}:8083")]
     return [
-        ("explorer", host),
-        ("rest", host),
-        ("webreports", host),
+        *given,
         ("webreports", f"{bare}:8083"),
         ("webreports", f"http://{bare}"),
         ("webreports", f"http://{bare}:8080"),

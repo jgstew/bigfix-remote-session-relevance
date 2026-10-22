@@ -36,14 +36,31 @@ def test_candidates_prefer_https_and_default_ports() -> None:
 
 
 @pytest.mark.parametrize(
-    "host", ["https://bes-root.local:52311", "https://[fe80::1]:8443", "https://bf.example.com"]
+    "host", ["https://bes-root.local:52311", "https://[fe80::1]:8443", "bf:52311/api"]
 )
-def test_candidates_keep_a_given_https_address(host: str) -> None:
+def test_candidates_keep_a_given_https_port(host: str) -> None:
     # Issue #17: "host:52311" became "[host:52311:8083]" and crashed httpx.
+    tried = candidates(host)
+    assert tried[:3] == [("explorer", host), ("rest", host), ("webreports", host)]
+    assert all(server.endswith(host) for _, server in tried)
+
+
+@pytest.mark.parametrize(
+    ("host", "bare"),
+    [
+        ("https://bf.example.com", "bf.example.com"),
+        ("HTTPS://bf.example.com/api", "bf.example.com"),
+        ("https://[::1]", "[::1]"),
+    ],
+)
+def test_candidates_given_https_still_tries_the_web_reports_ports(host: str, bare: str) -> None:
+    # A scheme alone names no port: each backend's default, and Web Reports'
+    # other https port, are still worth trying; http is not.
     assert candidates(host) == [
         ("explorer", host),
         ("rest", host),
         ("webreports", host),
+        ("webreports", f"{bare}:8083"),
     ]
 
 
@@ -57,9 +74,21 @@ def test_candidates_also_try_http_web_reports_on_a_given_port() -> None:
     ]
 
 
-def test_candidates_given_http_is_web_reports_only() -> None:
+@pytest.mark.parametrize("host", ["http://wr.example.com", "HTTP://wr:8080", "http://[::1]/api"])
+def test_candidates_given_http_is_web_reports_only(host: str) -> None:
     # Like the default candidates, only Web Reports is ever tried over http.
-    assert candidates("http://wr.example.com") == [("webreports", "http://wr.example.com")]
+    assert candidates(host) == [("webreports", host)]
+
+
+def test_candidates_keep_a_bracketed_ipv6_address() -> None:
+    assert candidates("[::1]") == [
+        ("explorer", "[::1]"),
+        ("rest", "[::1]"),
+        ("webreports", "[::1]"),
+        ("webreports", "[::1]:8083"),
+        ("webreports", "http://[::1]"),
+        ("webreports", "http://[::1]:8080"),
+    ]
 
 
 def test_candidates_bracket_a_bare_ipv6_address() -> None:
@@ -265,7 +294,12 @@ async def test_probe_a_host_with_a_port_tries_only_that_port() -> None:
         "webreports http://bes-root.local:52311",
         "webreports https://bes-root.local:52311",
     ]
-    assert {r.server for r in results} <= {"bes-root.local:52311", "http://bes-root.local:52311"}
+    # Every backend answered (401), so the https Web Reports is the one offered.
+    assert [(r.backend, r.server, r.status) for r in results] == [
+        ("explorer", "bes-root.local:52311", "auth"),
+        ("rest", "bes-root.local:52311", "auth"),
+        ("webreports", "bes-root.local:52311", "auth"),
+    ]
 
 
 async def test_probe_reports_auth_failure() -> None:
@@ -543,6 +577,26 @@ def test_setup_default_names_ignore_a_given_scheme_and_port(
     )
     (conn,) = load_config(path).connections
     assert (conn.name, conn.server, conn.password_env) == (name, host, env)
+
+
+def test_setup_saas_env_var_name_ignores_a_given_scheme(tmp_path: Path) -> None:
+    path = tmp_path / "c.toml"
+    host = "https://eulogin.bigfix.com"
+
+    async def fake(*args: Any) -> list[ProbeResult]:
+        return [ProbeResult("saas", host, "ok", D5, "")]
+
+    ask = _answers(host, EMAIL, "e", "", "y", "")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_on_prem_probe_not_called,
+        saas_probe_fn=fake,
+    )
+    assert code == 0
+    (conn,) = load_config(path).connections
+    assert (conn.name, conn.password_env) == ("bigfix-saas-eu", "BFRSR_EULOGIN_BIGFIX_COM_PASSWORD")
 
 
 def test_setup_shows_server_text_without_control_characters(
