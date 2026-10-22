@@ -776,10 +776,16 @@ def _lab(
     return factory, seen
 
 
+def _yes(listed: list[tuple[str, str]]) -> bool:
+    return True
+
+
 @pytest.mark.parametrize("state", ["", "via_explorer__"], ids=["no_explorer", "explorer"])
 async def test_probe_adds_the_servers_the_root_server_lists(state: str) -> None:
     factory, seen = _lab(f"{state}explorers", f"{state}webreports")
-    results = await probe("bigfix.example.com", "op", "pw", None, transport_factory=factory)
+    results = await probe(
+        "bigfix.example.com", "op", "pw", None, transport_factory=factory, confirm_listed=_yes
+    )
     listed = [(r.backend, r.server, r.status) for r in results if r.listed]
     # bigfix.example.com:9383 is the Explorer candidate already tried: not again.
     assert listed == [
@@ -796,7 +802,9 @@ async def test_probe_adds_the_servers_the_root_server_lists(state: str) -> None:
     ]
 
 
-async def test_probe_listed_servers_ask_the_same_trust_policy() -> None:
+async def test_probe_listed_servers_ask_the_same_trust_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Each listed endpoint is built with the trust the wizard passed in, so a
     # self-signed certificate there gets the same pin-it prompt.
     from bigfix_remote_session_relevance.setup_wizard import BACKEND_CLASSES
@@ -804,24 +812,87 @@ async def test_probe_listed_servers_ask_the_same_trust_policy() -> None:
     trusts: list[tuple[str, Any]] = []
     factory, _ = _lab()
     marker = object()
-    real = dict(BACKEND_CLASSES)
 
-    def spy(name: str) -> Any:
+    def spy(real: Any) -> Any:
         def build(server: str, **kwargs: Any) -> Any:
             trusts.append((server, kwargs["trust"]))
-            return real[name](server, **kwargs)
+            return real(server, **kwargs)
 
         return build
 
-    try:
-        for name in real:
-            BACKEND_CLASSES[name] = spy(name)  # type: ignore[assignment]
-        await probe("bigfix.example.com", "op", "pw", marker, transport_factory=factory)  # type: ignore[arg-type]
-    finally:
-        BACKEND_CLASSES.update(real)
+    for name, real in dict(BACKEND_CLASSES).items():
+        monkeypatch.setitem(BACKEND_CLASSES, name, spy(real))
+    await probe(
+        "bigfix.example.com",
+        "op",
+        "pw",
+        marker,  # type: ignore[arg-type]
+        transport_factory=factory,
+        confirm_listed=_yes,
+    )
     assert ("rootserver", marker) in trusts
     assert ("http://bigfix.example.com:888", marker) in trusts
     assert all(trust is marker for _, trust in trusts)
+
+
+@pytest.mark.parametrize("answer", [None, False], ids=["no_callback", "declined"])
+async def test_probe_sends_nothing_to_listed_servers_without_consent(answer: bool | None) -> None:
+    # The root server's lists are not the user's word: a listed host (maybe
+    # http, maybe anywhere) gets the password only once the user agrees.
+    factory, seen = _lab()
+    asked: list[list[tuple[str, str]]] = []
+
+    def decline(listed: list[tuple[str, str]]) -> bool:
+        asked.append(listed)
+        return False
+
+    results = await probe(
+        "bigfix.example.com",
+        "op",
+        "pw",
+        None,
+        transport_factory=factory,
+        confirm_listed=None if answer is None else decline,
+    )
+    assert not [s for s in seen if "rootserver" in s or ":888" in s]
+    assert not any(r.listed for r in results)
+    rest = next(r for r in results if r.backend == "rest")
+    assert "lists 2 other servers, not probed" in rest.message
+    if answer is not None:
+        assert asked == [
+            [("explorer", "rootserver"), ("webreports", "http://bigfix.example.com:888")]
+        ]
+
+
+def test_confirm_listed_names_each_server_and_warns_about_http(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from bigfix_remote_session_relevance.setup_wizard import confirm_listed_prompt
+
+    listed = [("explorer", "rootserver"), ("webreports", "http://bigfix.example.com:888")]
+    ask = _answers("")
+    assert confirm_listed_prompt(ask)(listed) is False  # the default is no
+    err = capsys.readouterr().err
+    assert "explorer   rootserver" in err
+    assert "http://bigfix.example.com:888 (cleartext)" in err
+    assert "[y/N]" in ask.prompts[0]
+    assert confirm_listed_prompt(_answers("y"))(listed) is True
+
+
+def test_run_setup_asks_before_probing_listed_servers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from bigfix_remote_session_relevance import setup_wizard
+
+    got: dict[str, Any] = {}
+
+    async def fake(host: str, username: str, password: str, trust: Any, **kw: Any) -> Any:
+        got.update(kw)
+        return []
+
+    monkeypatch.setattr(setup_wizard, "probe", fake)
+    run_setup(tmp_path / "c.toml", input_fn=_answers("bf", "op"), getpass_fn=lambda p: "pw")
+    assert callable(got["confirm_listed"])
 
 
 @pytest.mark.parametrize("state", ["", "via_explorer__"], ids=["no_explorer", "explorer"])
@@ -851,6 +922,7 @@ async def test_probe_lists_only_requested_backends() -> None:
         None,
         backends=("rest", "explorer"),
         transport_factory=factory,
+        confirm_listed=_yes,
     )
     assert [(r.backend, r.server) for r in results if r.listed] == [("explorer", "rootserver")]
     assert not [s for s in seen if s.startswith("webreports ")]
@@ -868,7 +940,9 @@ async def test_probe_listed_server_matching_a_given_port_is_not_probed_twice() -
     # The user typed the port of the Web Reports the root server also lists:
     # its http candidate is that same address, so it is probed once.
     factory, seen = _lab()
-    results = await probe("bigfix.example.com:888", "op", "pw", None, transport_factory=factory)
+    results = await probe(
+        "bigfix.example.com:888", "op", "pw", None, transport_factory=factory, confirm_listed=_yes
+    )
     assert "explorer https://rootserver:9383 /api/relevance" in seen  # the lists were read
     assert [s for s in seen if s.startswith("webreports http://")] == [
         "webreports http://bigfix.example.com:888 /webreports/soap"
@@ -904,3 +978,19 @@ def test_setup_shows_the_note_on_a_working_rest_result(
         tmp_path / "c.toml", input_fn=ask, getpass_fn=lambda p: "pw", probe_fn=_fake_probe(results)
     )
     assert note in capsys.readouterr().err
+
+
+def test_setup_keeps_default_names_unique_within_a_run(tmp_path: Path) -> None:
+    # The root lists its own Explorer under its short name, which shortens
+    # to the same name as the host typed; saying y must not overwrite it.
+    path = tmp_path / "c.toml"
+    results = [
+        ProbeResult("explorer", "bigfix.example.com", "ok", D1, ""),
+        ProbeResult("explorer", "bigfix", "ok", D1, "", listed=True),
+    ]
+    ask = _answers("bigfix.example.com", "op", "f", "y", "", "y", "")
+    assert (
+        run_setup(path, input_fn=ask, getpass_fn=lambda p: "pw", probe_fn=_fake_probe(results)) == 0
+    )
+    saved = {c.name: c.server for c in load_config(path).connections}
+    assert saved == {"bigfix-explorer": "bigfix.example.com", "bigfix-explorer-2": "bigfix"}

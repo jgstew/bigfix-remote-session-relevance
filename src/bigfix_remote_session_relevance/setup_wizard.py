@@ -51,6 +51,9 @@ from .trust import CertInfo, TrustStore
 
 InputFn = Callable[[str], str]
 ProbeTransportFactory = Callable[[str, str], httpx.AsyncBaseTransport | None]
+# Asked with the root server's listed (backend, server) pairs not yet tried;
+# True sends the same credentials to them.
+ConfirmListedFn = Callable[[list[tuple[str, str]]], bool]
 ProbeFn = Callable[[str, str, str, TrustPolicy | None], Coroutine[Any, Any, list["ProbeResult"]]]
 SaasProbeFn = Callable[[str, str, str, InputFn], Coroutine[Any, Any, list["ProbeResult"]]]
 
@@ -114,7 +117,15 @@ async def probe(
     *,
     backends: Collection[str] | None = None,
     transport_factory: ProbeTransportFactory | None = None,
+    confirm_listed: ConfirmListedFn | None = None,
 ) -> list[ProbeResult]:
+    """Probe the host's candidates, then the servers its root server lists.
+
+    The listed servers are probed only if ``confirm_listed`` agrees: the
+    root server's lists are not the user's word, and a listed server may be
+    anywhere, over http.
+    """
+
     def build(backend_name: str, server: str) -> Backend:
         transport = transport_factory(backend_name, server) if transport_factory else None
         return BACKEND_CLASSES[backend_name](
@@ -166,8 +177,29 @@ async def probe(
         if backend_name in wanted and (backend_name, address) not in seen:
             seen.add((backend_name, address))
             extra.append((backend_name, _config_server(backend_name, address)))
+    if not extra:
+        return results
+    if confirm_listed is None or not confirm_listed(extra):
+        note = f"the root server lists {len(extra)} other servers, not probed"
+        results[results.index(rest)] = replace(rest, message=note)
+        return results
     found = await asyncio.gather(*(one(b, s) for b, s in extra))
     return [*results, *(replace(r, listed=True) for r in found)]
+
+
+def confirm_listed_prompt(input_fn: InputFn) -> ConfirmListedFn:
+    """Show the listed servers and ask before the password goes to them."""
+
+    def confirm(listed: list[tuple[str, str]]) -> bool:
+        _say("\nThe root server lists these other servers:")
+        for backend, server in listed:
+            # Server text: the root server's, so escaped like any other.
+            clear = " (cleartext)" if server.startswith("http://") else ""
+            _say(f"  {backend:<10} {escape_controls(server)}{clear}")
+        answer = input_fn("Send the same username and password to them too? [y/N] ")
+        return answer.strip().lower() in ("y", "yes")
+
+    return confirm
 
 
 async def probe_saas(
@@ -291,9 +323,12 @@ def run_setup(
         trust = TrustStore(callback=confirm_cert)
         say(f"Probing {host} ...")
         results = asyncio.run(
-            (probe_fn or functools.partial(probe, backends=backends))(
-                host, username, password, trust
-            )
+            (
+                probe_fn
+                or functools.partial(
+                    probe, backends=backends, confirm_listed=confirm_listed_prompt(input_fn)
+                )
+            )(host, username, password, trust)
         )
     answered_elsewhere: list[str] = []
     if backends is not None:
@@ -361,6 +396,11 @@ def run_setup(
         ):
             continue
         default_name = _default_name(host, r)
+        # A listed server can shorten to the name just saved (the root's own
+        # Explorer under its machine name): number it rather than replace.
+        base, n = default_name, 2
+        while default_name in saved:
+            default_name, n = f"{base}-{n}", n + 1
         name = input_fn(f"Connection name [{default_name}]: ").strip() or default_name
         replace = False
         if name in existing:

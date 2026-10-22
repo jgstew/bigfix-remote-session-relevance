@@ -144,3 +144,20 @@ def test_parse_ignores_layout_whitespace() -> None:
     )
     response = httpx.Response(200, text=body, headers={"content-type": "application/xml"})
     assert parse_registered_urls(response, "Explorer", "rest") == ["https://ROOTSERVER:9383"]
+
+
+async def test_registered_servers_keeps_a_list_when_the_other_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/webreports":
+            return httpx.Response(500, text="boom")
+        return _captured("explorers")
+
+    backend = RestBackend(
+        "bf", username="op", password="pw", transport=httpx.MockTransport(handler)
+    )
+    async with backend:
+        found = await backend.registered_servers()
+    assert found == [
+        ("explorer", "https://ROOTSERVER:9383"),
+        ("explorer", "https://bigfix.example.com:9383"),
+    ]

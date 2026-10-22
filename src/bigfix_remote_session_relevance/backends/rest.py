@@ -198,18 +198,22 @@ class RestBackend(Backend):
         Opt-in, for ``--setup`` to find servers that are not on the root
         server itself. Both lists need a master operator (anyone else gets
         403 "Action requires master operator privileges.", reported as
-        ``authentication`` / ``permission_denied``). The URLs are as the root
-        server has them, e.g. a short machine name that may not resolve here.
+        ``authentication`` / ``permission_denied``). An error is returned
+        only when both lists failed. The URLs are as the root server has
+        them, e.g. a short machine name that may not resolve here.
         """
 
         async def _op(client: httpx.AsyncClient) -> list[tuple[str, str]] | ResultError:
             found: list[tuple[str, str]] = []
+            errors: list[ResultError] = []
             for backend, path, element in REGISTERED_SERVER_LISTS:
                 urls = parse_registered_urls(await client.get(path), element, self.name)
                 if isinstance(urls, ResultError):
-                    return urls
-                found.extend((backend, url) for url in urls)
-            return found
+                    errors.append(urls)
+                else:
+                    found.extend((backend, url) for url in urls)
+            # One list failing (e.g. a 500) does not lose the other.
+            return errors[0] if errors and len(errors) == len(REGISTERED_SERVER_LISTS) else found
 
         return await self._with_trust(_op)
 

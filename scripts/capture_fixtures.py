@@ -19,9 +19,11 @@ Explorer, the ``via_explorer__`` ones with Explorer. Capture into a scratch
 ``--out`` and copy across, rather than overwriting the other state's files.
 
 REST connections also GET the root server's lists of registered Explorer
-and Web Reports servers (``REST_GETS``, XML) into ``rest/captured/discovery/``.
-A 200 is written as ``<case>``, anything else as ``<case>_<status>``: these
-need a master operator, and the 403 an operator gets is worth keeping too.
+and Web Reports servers (``REST_GETS``, XML) and write anything but a 200
+to ``rest/captured/discovery/<case>_<status>``, e.g. the 403 a non-master
+operator gets. A master operator's 200 is never written: it names other
+internal servers and the root's machine name, which the host redaction
+does not know about, so paste and redact those by hand.
 
 Redaction: session tokens, IPv4 addresses, configured hosts, the gather URL
 host and every configured username/password are replaced, and every 64-hex
@@ -115,8 +117,8 @@ QUERIES = {
     "error_no_string": "(bes sites) whose (master site flag of it)",
     "error_nonexistent": '"3 days 04:05:06" as time interval',
 }
-# Root server REST lists that --setup reads; never their JSON forms, whose
-# Web Reports entries carry each server's token.
+# Root server REST lists that --setup reads, as XML: the Web Reports JSON
+# form carries each server's token.
 REST_GETS = {"explorers": "/api/explorers", "webreports": "/api/webreports"}
 # Probe literals redact() would take for an IPv4 address, kept only in the
 # body of their own case and only as a whole value.
@@ -137,8 +139,12 @@ async def capture(
                 results[key] = await backend.evaluate(session_relevance)
         for key, url in REST_GETS.items() if conn.backend == "rest" else ():
             if only is None or key in only:
+
+                async def get(client: httpx.AsyncClient, url: str = url) -> httpx.Response:
+                    return await client.get(url)
+
                 # Through _with_trust, so auth and pinning are the library's own.
-                response = await backend._with_trust(lambda c, url=url: c.get(url))
+                response = await backend._with_trust(get)
                 if isinstance(response, httpx.Response):
                     results[key] = response
                 else:
@@ -192,8 +198,11 @@ def main() -> int:
             if only is not None and key not in only:
                 continue
             if isinstance(result, httpx.Response):
+                if result.status_code == 200:
+                    print(f"{conn.name} {key}: 200 not written (names unredacted hosts)")
+                    continue
                 body = _HASH_RE.sub(fake_hash, _redact(result.text, hosts, secrets, key))
-                name = key if result.status_code == 200 else f"{key}_{result.status_code}"
+                name = f"{key}_{result.status_code}"
                 print(f"{conn.name:<24} {name:<24} {result.status_code}")
                 _write(out_dir / "discovery", name, body, result)
                 continue

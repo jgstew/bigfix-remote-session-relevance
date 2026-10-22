@@ -61,7 +61,11 @@ field differ.
   requests carry the wrong password.
 - **Registered servers (setup only).** `RestBackend.registered_servers()`
   GETs `/api/explorers` and `/api/webreports` (XML) and returns
-  `(backend, url)` pairs; `--setup` probes the ones it has not already tried.
+  `(backend, url)` pairs (an error only if both lists failed). `--setup`
+  probes the ones it has not already tried, and only after the user agrees:
+  the lists are the root server's word, not the user's, and a listed server
+  may be anywhere, over http. `probe()` without `confirm_listed` never sends
+  credentials to them.
   **(observed, 11.0.7)** Both need a master operator: anyone else gets `403
   text/plain "Action requires master operator privileges."`
   (`authentication` / `permission_denied`). The list endpoint is the plural
