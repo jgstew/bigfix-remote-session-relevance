@@ -229,10 +229,11 @@ the bigfix-saas MCP server, which makes the same choices).
 ### BigFix Query (ClientQuery)
 
 Opt-in and additive, like the Explorer extras: `ClientQueryExtras`
-(`backends/client_query.py`), implemented only by `RestBackend`. It sends
-**client** relevance (the parameter is `client_relevance`), so it never
-shares a code path with `evaluate()`. BigFix SaaS is left out until a
-supported SaaS client query API is confirmed.
+(`backends/client_query.py`), implemented by `RestBackend` and (since
+1.3.0) `SaasBackend`. It sends **client** relevance (the parameter is
+`client_relevance`), so it never shares a code path with `evaluate()`. The
+argument checks and `ClientQueryResponse` building live in `client_query.py`,
+so both backends behave the same to a caller.
 
 - `submit_client_query(client_relevance, computer_ids)`: `POST
   /api/clientquery`, `Content-Type: application/xml`, body
@@ -240,6 +241,19 @@ supported SaaS client query API is confirmed.
   built with ElementTree, so the text is XML-escaped. **(observed)** `<`, `&`
   and `%22` reach the agent intact (`results_escaped`). No computer ids, or
   ids that are not integers, raise: a caller bug.
+- `submit_client_query(..., use_client_context=True|False)` adds
+  `<UseClientContext>true|false</UseClientContext>` between `QueryText` and
+  `Target` (the BESAPI 11.0.7.61 schema makes `ClientQuery` an
+  `xs:sequence`, so order matters). Without it agents evaluate like qna, with
+  no fixlet or site context. The default `None` omits the element, so the
+  body is byte-for-byte the 1.2.0 one for servers that predate it. A
+  non-bool (`1`, `"false"`) raises `TypeError`. **(observed, through BigFix
+  SaaS, whose bfproxy sends this same XML to its root server)** with it
+  `values of headers "X-Fixlet-Source-Release-Date" of relevant fixlets of
+  sites` answered 135 rows; without it, one `isFailure` row "The expression
+  could not be evaluated: class InspectorFixletContextError". The results'
+  shape does not change. Which on-prem server versions accept it is not
+  confirmed (the schema that has it is 11.0.7.61).
 - **(observed)** The answer's `<ClientQuery Resource="http://…:52311/api/clientquery/N">`
   is `http://` for an https request, so only `<ID>` is read (with defusedxml).
 - `client_query_results(query_id)`: `GET /api/clientqueryresults/{id}?output=json`.
@@ -268,6 +282,52 @@ supported SaaS client query API is confirmed.
   non-200s are `http` with the server's text in the message: **(observed)**
   `400 "cannot get results for queries not submitted by the logged user"` for
   another operator's or an unknown id. Unparsable bodies are `response_format`.
+
+#### On BigFix SaaS (fast query)
+
+**(observed 2026-10-26)** on one Windows agent (client 11.0.5.204); captures
+in `tests/fixtures/saas/captured/clientquery/`. Request shapes are also in
+be-bfproxy-service `src/helpers/requests.js` and `src/v1/routes/clientquery.yaml`.
+
+- `submit_client_query`: `POST /core/v2/clientquery/create` (the usual
+  envelope, `sid` top-level) with `data = {queryText, applicabilityRelevance:
+  "true", useClientContext?, target: {computerId: N}}` →
+  `{"data": {"clientQueryId": "2"}}`, a string read as an int. bfproxy turns
+  it into the same `<BESAPI><ClientQuery>` XML REST sends, as a non-master
+  operator. `queryTitle` / `description` / `category` / `parameters` would
+  make it a saved query, so none are sent. Core also keeps it in the
+  operator's console history.
+- **One computer per query.** `target` takes one of `computerId` (a single
+  integer in the route schema) / `computerName` / `customRelevance` /
+  `computerGroup`. **(observed)** A `customRelevance` target got no answer in
+  two minutes, whether `exists (N; 1) whose (it = computer id)` or just
+  `computer id = N`, from the agent that answered `computerId: N` in about
+  9 s. So several ids (after removing duplicates) are an error result,
+  `unsupported_feature` / `multiple_targets`, sent nowhere: not a raise,
+  since REST accepts them and callers written against `ClientQueryExtras`
+  must keep working. bfproxy drops a falsy `computerId`, leaving no target
+  (every device), so ids ≤ 0 raise `ValueError` (a caller bug).
+- Core answers 400 for a body it cannot parse, 403 for a `sid` the operator
+  may not use and 409 for a duplicate saved-query title, but every upstream
+  failure (from bfproxy or the root server) is a bare 500, possibly after it
+  submitted to the root server, so a submit is never resent, except once
+  after a 401 (the gateway refusing the cookie before core sees the request,
+  the same renewal `evaluate()` does). The 500's message says why it is
+  uninformative. No error bodies are captured yet.
+- `client_query_results`: `POST /bfproxy/v1/clientquery/listresults` with
+  `data = {queryId: "<id>", start, count: 1000, stats: true}` →
+  `{results: [{computerId, computerName, subQueryId, isFailure, result,
+  responseTime}], totalResults, agentCount}`, `{"results": [], "totalResults":
+  0, ...}` until the agent answers. It pages until a page is short (fewer
+  than `count` rows) or it has `totalResults` rows; a short page ends it even
+  if the total grew meanwhile, and without a total only a short page does.
+  As on REST it is all or nothing: an error on any page drops every row.
+  Offset paging assumes rows keep their order while agents answer; only a
+  finished answer was observed paging.
+  **(observed)** Pages of 50 over a 135-row answer returned the same rows,
+  in the same order, as one page of 1000. As on REST, a plural answer is one
+  row per value and an empty value is a `""` row; only the id key's case
+  differs (`computerId`).
 
 ## The result contract
 
@@ -327,7 +387,7 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `tls` | certificate problems | `cert_verify_failed`, `untrusted`, `pin_mismatch`, `pinned_cert_invalid`, `client_cert`, `tls_handshake` |
 | `http` | other statuses | `service_unavailable` |
 | `response_format` | not the expected JSON/XML (e.g. a login page) | |
-| `unsupported_feature` | Explorer extras on a deployment without Explorer access | |
+| `unsupported_feature` | Explorer extras on a deployment without Explorer access; a BigFix SaaS fast query with several computer ids | `multiple_targets` (SaaS fast query) |
 
 Session relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the

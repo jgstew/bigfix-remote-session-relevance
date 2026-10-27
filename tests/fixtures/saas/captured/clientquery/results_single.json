@@ -1,0 +1,1 @@
+{"status":200,"message":"Ok","data":{"results":[{"computerId":1000001,"computerName":"COMPUTER-1","subQueryId":1,"isFailure":false,"result":"COMPUTER-1","responseTime":9000}],"totalResults":1,"agentCount":1}}
