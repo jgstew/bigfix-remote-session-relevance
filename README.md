@@ -205,7 +205,8 @@ could mean client relevance): `result.session_relevance`, the `to_dict()` /
 ### BigFix Query (ClientQuery, provisional)
 
 `RestBackend` can also send **client** relevance to agents through the root
-server's BigFix Query API, for tools such as
+server's BigFix Query API, and (since 1.3.0) `SaasBackend` through BigFix
+SaaS fast query, for tools such as
 [bigfix-remote-client-relevance](https://github.com/jgstew/bigfix-remote-client-relevance)
 that want this package's config, credentials and certificate pinning. It is
 opt-in and separate: `evaluate()` is unchanged. Two calls, and polling is
@@ -220,7 +221,7 @@ from bigfix_remote_session_relevance import (
 
 conn = next(c for c in load_config().connections if c.backend == "rest")
 async with RestBackend.from_config(conn, trust=TrustStore()) as backend:
-    assert supports_client_query(backend)  # only RestBackend, for now
+    assert supports_client_query(backend)  # RestBackend and SaasBackend
     submitted = await backend.submit_client_query("computer name", [<COMPUTER_ID>])
     if submitted.ok and submitted.query_id is not None:
         results = await backend.client_query_results(submitted.query_id)
@@ -233,11 +234,27 @@ async with RestBackend.from_config(conn, trust=TrustStore()) as backend:
             print(row.computer_id, row.computer_name, row.is_failure, row.result)
 ```
 
+By default agents evaluate it like qna, with no fixlet or site context, so
+`relevant fixlets of sites` fails (`InspectorFixletContextError`). Since 1.3.0,
+`submit_client_query(..., use_client_context=True)` asks the agent to
+evaluate it in its client context instead (`<UseClientContext>` in the
+BESAPI 11.0.7 schema). The default, `None`, leaves the element out, so
+servers that predate it see the same request as before.
+
 Errors are results here too (`response.error` is a `ResultError`); only
-caller bugs raise (no computer ids, or ids that are not integers). Operators
+caller bugs raise (no computer ids, ids that are not integers, or a
+`use_client_context` that is not a bool). Operators
 who are not master operators need the **Can Submit Queries** permission.
 Computers outside the operator's scope are accepted without an error but
 never answer, so stop polling on your own timeout.
+
+On BigFix SaaS, a query targets **one** computer. Several ids come back as
+an error result (`unsupported_feature` / `multiple_targets`) and nothing is
+sent, so submit one query per computer. Ids must be positive (`ValueError`
+otherwise: the service would treat `0` as no target, which is every
+device). A submit also shows up in the operator's console history, and most
+failed submits are a bare HTTP 500, including client relevance the root
+server rejects.
 
 ### Setup from another tool (provisional)
 

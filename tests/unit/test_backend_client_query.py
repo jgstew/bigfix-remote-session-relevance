@@ -1,4 +1,4 @@
-"""ClientQuery is additive: a separate, opt-in API that only RestBackend has.
+"""ClientQuery is additive: a separate, opt-in API on RestBackend (and SaasBackend).
 
 The wire tests replay responses captured from an 11.x root server
 (``tests/fixtures/rest/captured/clientquery/``, see tests/fixtures/README.md).
@@ -17,6 +17,7 @@ import pytest
 from bigfix_remote_session_relevance.backends.client_query import (
     ClientQueryResponse,
     ClientQueryRow,
+    client_query_body,
     supports_client_query,
 )
 from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
@@ -292,7 +293,7 @@ def test_supports_client_query() -> None:
     assert supports_client_query(RestBackend("h"))
     assert not supports_client_query(ExplorerBackend("h"))
     assert not supports_client_query(WebReportsBackend("h"))
-    assert not supports_client_query(SaasBackend("login.bigfix.com"))
+    assert supports_client_query(SaasBackend("login.bigfix.com"))
 
 
 def test_response_to_dict() -> None:
@@ -364,3 +365,58 @@ async def test_from_config_returns_the_subclass(tmp_path: Path) -> None:
     backend = RestBackend.from_config(conn)
     assert_type(backend, RestBackend)
     assert isinstance(backend, RestBackend)
+
+
+def test_body_without_use_client_context_is_unchanged() -> None:
+    # The 1.2.0 body, byte for byte: omitting the element keeps older servers working.
+    assert client_query_body("computer name", [1000001]) == (
+        b"<?xml version='1.0' encoding='utf-8'?>\n"
+        b"<BESAPI><ClientQuery><ApplicabilityRelevance>true</ApplicabilityRelevance>"
+        b"<QueryText>computer name</QueryText>"
+        b"<Target><ComputerID>1000001</ComputerID></Target></ClientQuery></BESAPI>"
+    )
+
+
+@pytest.mark.parametrize(("flag", "text"), [(True, "true"), (False, "false")])
+def test_body_use_client_context_sits_between_query_text_and_target(flag: bool, text: str) -> None:
+    # The BESAPI 11.0.7.61 schema makes ClientQuery an xs:sequence, so order matters.
+    query = SafeET.fromstring(
+        client_query_body("computer name", [1000001], use_client_context=flag)
+    ).find("ClientQuery")
+    assert query is not None
+    assert [child.tag for child in query] == [
+        "ApplicabilityRelevance",
+        "QueryText",
+        "UseClientContext",
+        "Target",
+    ]
+    assert query.findtext("UseClientContext") == text
+
+
+@pytest.mark.parametrize("bad", [1, 0, "true", "false"])
+def test_body_rejects_non_bool_use_client_context(bad: object) -> None:
+    with pytest.raises(TypeError, match="use_client_context must be a bool"):
+        client_query_body("computer name", [1000001], use_client_context=bad)  # type: ignore[arg-type]
+
+
+async def test_submit_sends_use_client_context(recording_transport: type) -> None:
+    rec = recording_transport([_captured("submit_single")])
+    async with _rest(rec.transport) as b:
+        response = await b.submit_client_query("computer name", [1000001], use_client_context=True)
+    assert response.ok, response.error
+    query = _sent(rec.requests[0]).find("ClientQuery")
+    assert query is not None
+    assert [child.tag for child in query][2:] == ["UseClientContext", "Target"]
+    assert query.findtext("UseClientContext") == "true"
+
+
+async def test_submit_rejects_non_bool_use_client_context(recording_transport: type) -> None:
+    rec = recording_transport([_captured("submit_single")])
+    async with _rest(rec.transport) as b:
+        with pytest.raises(TypeError, match="use_client_context must be a bool"):
+            await b.submit_client_query(
+                "computer name",
+                [1000001],
+                use_client_context="false",  # type: ignore[arg-type]
+            )
+    assert rec.requests == []

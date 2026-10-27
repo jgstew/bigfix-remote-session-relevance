@@ -46,10 +46,12 @@ from ._parsing import parse_session_relevance_response
 from .base import Backend, error_from_status
 from .client_query import (
     ClientQueryResponse,
-    ClientQueryRow,
+    Outcome,
+    check_query_id,
     client_query_body,
     parse_results,
     parse_submit,
+    response_from,
 )
 from .explorer_extras import explorer_body
 
@@ -59,8 +61,6 @@ EXPLORER_RECHECK_SECONDS = 300.0
 _NO_EXPLORER_RE = re.compile(r"no reachable BigFix Explorer", re.IGNORECASE)
 # Form errors that can mean Explorer is back (see the module docstring).
 _RETRY_JSON_RE = re.compile(r"character which is not allowed|invalid json", re.IGNORECASE)
-# A client query call: (query id, rows so far), or the server's error.
-_Outcome = tuple[int | None, list[ClientQueryRow]] | ResultError
 # The root server's lists of the servers registered with it: (backend, path,
 # element). XML, not ?output=json: the JSON Web Reports entries carry each
 # server's token, which the library has no use for.
@@ -137,16 +137,26 @@ class RestBackend(Backend):
         return await self._run(session_relevance, _op)
 
     async def submit_client_query(
-        self, client_relevance: str, computer_ids: Sequence[int]
+        self,
+        client_relevance: str,
+        computer_ids: Sequence[int],
+        *,
+        use_client_context: bool | None = None,
     ) -> ClientQueryResponse:
         """Submit client relevance to these computers; the response has the query id.
 
-        Opt-in BigFix Query (see ``client_query``). Raises only for caller
-        bugs (no computer ids, or ids that are not integers).
+        Opt-in BigFix Query (see ``client_query``). By default agents evaluate
+        it like qna, with no fixlet or site context; ``use_client_context=True``
+        sends ``<UseClientContext>true</UseClientContext>`` so expressions like
+        ``relevant fixlets of sites`` can be answered. None (the default) omits
+        the element. Raises only for caller bugs (no computer ids, ids that are
+        not integers, or a ``use_client_context`` that is not a bool or None).
         """
-        body = client_query_body(client_relevance, computer_ids)
+        body = client_query_body(
+            client_relevance, computer_ids, use_client_context=use_client_context
+        )
 
-        async def _op(client: httpx.AsyncClient) -> _Outcome:
+        async def _op(client: httpx.AsyncClient) -> Outcome:
             response = await client.post(
                 "/api/clientquery", content=body, headers={"Content-Type": "application/xml"}
             )
@@ -157,10 +167,9 @@ class RestBackend(Backend):
 
     async def client_query_results(self, query_id: int) -> ClientQueryResponse:
         """Every row a submitted query has so far; agents keep adding rows."""
-        if isinstance(query_id, bool) or not isinstance(query_id, int):
-            raise TypeError(f"query_id must be an integer, got {query_id!r}")
+        check_query_id(query_id)
 
-        async def _op(client: httpx.AsyncClient) -> _Outcome:
+        async def _op(client: httpx.AsyncClient) -> Outcome:
             response = await client.get(
                 f"/api/clientqueryresults/{query_id}", params={"output": "json"}
             )
@@ -172,25 +181,10 @@ class RestBackend(Backend):
     async def _client_query(
         self,
         query_id: int | None,
-        operation: Callable[[httpx.AsyncClient], Awaitable[_Outcome]],
+        operation: Callable[[httpx.AsyncClient], Awaitable[Outcome]],
     ) -> ClientQueryResponse:
         start = time.perf_counter()
-        outcome = await self._with_trust(operation)
-        rows: list[ClientQueryRow] = []
-        error: ResultError | None = None
-        if isinstance(outcome, ResultError):
-            error = outcome
-        else:
-            query_id, rows = outcome
-        return ClientQueryResponse(
-            query_id=query_id,
-            rows=rows,
-            error=error,
-            connection=self.connection,
-            server=self.address.base_url,
-            backend=self.name,
-            elapsed_ms=round((time.perf_counter() - start) * 1000, 3),
-        )
+        return response_from(self, query_id, await self._with_trust(operation), start)
 
     async def registered_servers(self) -> list[tuple[str, str]] | ResultError:
         """``(backend, url)`` for each Explorer and Web Reports server the root lists.

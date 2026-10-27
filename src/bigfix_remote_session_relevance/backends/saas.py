@@ -31,6 +31,30 @@ bigfix-saas MCP server, which pins the same choices):
 
 SaaS ``prefilter`` uses BigFix's criteria DSL, not relevance strings, so this
 backend does not implement the Explorer extras.
+
+BigFix Query (fast query, ``ClientQueryExtras``), observed 2026-10-26 on one
+Windows agent (client 11.0.5.204) and in the be-bfproxy-service source:
+
+* Submit is core v2 ``clientquery/create`` with ``data = {queryText,
+  applicabilityRelevance, useClientContext?, target}`` and answers
+  ``{"clientQueryId": "16"}`` (a string). Core stores the query in the
+  operator's console history and notifies the console as agents answer.
+  ``queryTitle`` / ``description`` / ``category`` / ``parameters`` would make
+  it a saved query, so none are sent.
+* ``target`` takes ONE of ``computerId`` (one integer, which bfproxy sends
+  to the root server as ``<Target><ComputerID>``) / ``computerName`` /
+  ``customRelevance`` / ``computerGroup``. bfproxy drops a falsy
+  ``computerId``, leaving no target: every device the operator can see, so
+  ids must be positive. A ``customRelevance`` target, even ``computer id =
+  N``, was never answered by an agent that answered a ``computerId`` target
+  in seconds, so several ids cannot be one query: a submit takes one id.
+* ``useClientContext: true`` makes fixlet inspectors work: ``relevant
+  fixlets of sites`` fails with ``InspectorFixletContextError`` without it.
+* Core answers every upstream failure with a bare 500, after it may already
+  have submitted to the root server, so a submit is never resent except
+  after a 401 (the gateway refusing the cookie, before core sees it).
+* Results are bfproxy v1 ``clientquery/listresults`` with ``data = {queryId,
+  start, count, stats}``, paged; ``stats`` adds ``totalResults``.
 """
 
 from __future__ import annotations
@@ -40,7 +64,8 @@ import hashlib
 import re
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -50,6 +75,16 @@ from ..server_address import saas_api_address
 from ..value_types import loads_json
 from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
 from .base import Backend, error_from_status
+from .client_query import (
+    ClientQueryResponse,
+    ClientQueryRow,
+    Outcome,
+    check_computer_ids,
+    check_query_id,
+    check_use_client_context,
+    response_from,
+    row_from_json,
+)
 
 _SID_KEY = re.compile(r"[0-9A-Za-z_-]+")
 
@@ -59,6 +94,10 @@ if TYPE_CHECKING:
 LOGIN_PATH = "/auth/v1/user/login"
 REFRESH_PATH = "/auth/v1/token/refresh"
 RELEVANCE_PATH = "/bfproxy/v2/relevance"
+CLIENT_QUERY_CREATE_PATH = "/core/v2/clientquery/create"
+CLIENT_QUERY_RESULTS_PATH = "/bfproxy/v1/clientquery/listresults"
+# Rows per listresults call (the bigfix-saas MCP server's default maximum).
+CLIENT_QUERY_PAGE = 1000
 # Renew this long before the session's expiry rather than racing it.
 EXPIRY_SLACK_S = 30.0
 
@@ -180,22 +219,115 @@ class SaasBackend(Backend):
     async def _evaluate(
         self, client: httpx.AsyncClient, session_relevance: str
     ) -> SessionRelevanceResult:
+        response = await self._signed_in_post(client, RELEVANCE_PATH, {"query": session_relevance})
+        if isinstance(response, ResultError):
+            return SessionRelevanceResult.failure(session_relevance, response)
+        return parse_saas_session_relevance(session_relevance, response, self.name)
+
+    async def _signed_in_post(
+        self, client: httpx.AsyncClient, path: str, data: dict[str, Any]
+    ) -> httpx.Response | ResultError:
+        """POST to this backend's server, signing in first and renewing once on a 401.
+
+        A 401 is the gateway refusing the cookie before the request reaches
+        the service, so the one resend cannot repeat anything.
+        """
         problem = await self._ensure_session(client)
         if problem is not None:
-            return SessionRelevanceResult.failure(session_relevance, problem)
+            return problem
         generation = self._sync_cookies(client)
-        response = await self._post(
-            client, RELEVANCE_PATH, {"query": session_relevance}, sid=self.sid
-        )
+        response = await self._post(client, path, data, sid=self.sid)
         if response.status_code == 401:
             problem = await self._renew(client, generation)
             if problem is not None:
-                return SessionRelevanceResult.failure(session_relevance, problem)
+                return problem
             self._sync_cookies(client)
-            response = await self._post(
-                client, RELEVANCE_PATH, {"query": session_relevance}, sid=self.sid
+            response = await self._post(client, path, data, sid=self.sid)
+        return response
+
+    # -- BigFix Query (fast query) ----------------------------------------------------
+
+    async def submit_client_query(
+        self,
+        client_relevance: str,
+        computer_ids: Sequence[int],
+        *,
+        use_client_context: bool | None = None,
+    ) -> ClientQueryResponse:
+        """Submit client relevance to these computers; the response has the query id.
+
+        The same opt-in BigFix Query as `RestBackend.submit_client_query`,
+        through the BigFix SaaS fast query API. It also appears in the
+        operator's console history. Unlike REST it targets one computer per
+        query (see the module docstring): several ids are an
+        ``unsupported_feature`` / ``multiple_targets`` error result, sent
+        nowhere. Raises only for caller bugs: no computer ids, ids that are
+        not positive integers, or a ``use_client_context`` that is not a bool
+        or None.
+        """
+        ids = list(dict.fromkeys(check_computer_ids(computer_ids)))
+        if any(computer_id <= 0 for computer_id in ids):
+            # bfproxy drops a falsy computerId, which would leave no target
+            # and reach every device the operator can see.
+            raise ValueError(f"computer_ids must be positive, got {ids}")
+        check_use_client_context(use_client_context)
+        start = time.perf_counter()
+        if len(ids) > 1:
+            # Valid input that REST takes, so a result rather than a raise:
+            # callers written against ClientQueryExtras keep working.
+            refused = ResultError(
+                kind="unsupported_feature",
+                code="multiple_targets",
+                backend=self.name,
+                message=(
+                    f"BigFix SaaS fast query targets one computer per query, got {len(ids)}"
+                    " ids; submit one query per computer"
+                ),
             )
-        return parse_saas_session_relevance(session_relevance, response, self.name)
+            return response_from(self, None, refused, start)
+        data: dict[str, Any] = {"queryText": client_relevance, "applicabilityRelevance": "true"}
+        if use_client_context is not None:
+            data["useClientContext"] = use_client_context
+        data["target"] = {"computerId": ids[0]}
+
+        async def _op(client: httpx.AsyncClient) -> Outcome:
+            response = await self._signed_in_post(client, CLIENT_QUERY_CREATE_PATH, data)
+            if isinstance(response, ResultError):
+                return response
+            found = _parse_create(response, self.name)
+            return found if isinstance(found, ResultError) else (found, [])
+
+        return response_from(self, None, await self._with_trust(_op), start)
+
+    async def client_query_results(self, query_id: int) -> ClientQueryResponse:
+        """Every row a submitted query has so far, reading every page."""
+        check_query_id(query_id)
+
+        async def _op(client: httpx.AsyncClient) -> Outcome:
+            rows: list[ClientQueryRow] = []
+            while True:
+                data = {
+                    "queryId": str(query_id),
+                    "start": len(rows),
+                    "count": CLIENT_QUERY_PAGE,
+                    "stats": True,
+                }
+                response = await self._signed_in_post(client, CLIENT_QUERY_RESULTS_PATH, data)
+                if isinstance(response, ResultError):
+                    return response
+                page = _parse_results_page(response, self.name)
+                if isinstance(page, ResultError):
+                    return page
+                found, total = page
+                rows += found
+                # A short page is the end of what is there, even if agents
+                # answered meanwhile and the total grew; without a total, only
+                # a short page tells.
+                if len(found) < CLIENT_QUERY_PAGE or (total is not None and len(rows) >= total):
+                    return (query_id, rows)
+
+        start = time.perf_counter()
+        return response_from(self, query_id, await self._with_trust(_op), start)
 
     # -- session ----------------------------------------------------------------------
 
@@ -318,6 +450,78 @@ class SaasBackend(Backend):
         if sid is not None:
             envelope["sid"] = sid
         return await client.post(path, json=envelope)
+
+
+def _client_query_data(
+    response: httpx.Response, backend: str, *, submit: bool = False
+) -> dict[str, Any] | ResultError:
+    """The envelope's ``data`` object, or the error a non-200 or bad body means."""
+    if response.status_code != 200:
+        error = error_from_status(response, backend)
+        message = _error_message(response)
+        if message:
+            error = replace(error, message=message)
+        if submit and response.status_code == 500:
+            error = replace(
+                error,
+                message=(
+                    f"{error.message} (BigFix SaaS answers 500 for any failed client query"
+                    " submit, including client relevance the root server rejects)"
+                ),
+            )
+        return error
+    try:
+        body = loads_json(response.text)
+    except ValueError as exc:
+        return _client_query_format_error(response, backend, f"invalid JSON: {exc}")
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return _client_query_format_error(response, backend, 'expected a "data" object')
+    return data
+
+
+def _parse_create(response: httpx.Response, backend: str) -> int | ResultError:
+    data = _client_query_data(response, backend, submit=True)
+    if isinstance(data, ResultError):
+        return data
+    found = data.get("clientQueryId")
+    # The id comes as a string ("2"); ClientQueryResponse.query_id is an int.
+    # ASCII digits only: str.isdigit() also accepts "²", which int() rejects.
+    if isinstance(found, str) and re.fullmatch(r"[0-9]+", found.strip()):
+        found = int(found)
+    if isinstance(found, bool) or not isinstance(found, int) or found <= 0:
+        return _client_query_format_error(response, backend, "no integer clientQueryId")
+    return found
+
+
+def _parse_results_page(
+    response: httpx.Response, backend: str
+) -> tuple[list[ClientQueryRow], int | None] | ResultError:
+    data = _client_query_data(response, backend)
+    if isinstance(data, ResultError):
+        return data
+    results = data.get("results")
+    if not isinstance(results, list):
+        return _client_query_format_error(response, backend, 'expected a "results" list')
+    rows: list[ClientQueryRow] = []
+    for item in results:
+        row = row_from_json(item, id_key="computerId")
+        if row is None:
+            message = f"unexpected result row: {item!r}"[:200]
+            return _client_query_format_error(response, backend, message)
+        rows.append(row)
+    total = data.get("totalResults")
+    return rows, total if isinstance(total, int) and not isinstance(total, bool) else None
+
+
+def _client_query_format_error(response: httpx.Response, backend: str, message: str) -> ResultError:
+    return ResultError(
+        kind="response_format",
+        backend=backend,
+        http_status=response.status_code,
+        message=message,
+        detail=response.text[:500],
+    )
 
 
 def _error_message(response: httpx.Response) -> str | None:

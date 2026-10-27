@@ -32,6 +32,13 @@ computer is redacted to id `1000001` / `COMPUTER-1` and the server address
 to `bigfix.example.com`. The 403 permission case has no capture yet; its
 test uses a synthetic body.
 
+`saas/captured/clientquery/` are BigFix SaaS fast query response bodies
+(`/core/v2/clientquery/create`, `/bfproxy/v1/clientquery/listresults`),
+captured by hand on 2026-10-26 from one Windows agent (client 11.0.5.204),
+redacted to id `1000001` / `COMPUTER-1`. `results_no_client_context` and
+`results_client_context` are the same fixlet-header expression without and
+with `useClientContext: true`.
+
 `rest/captured/discovery/` are the root server's lists of registered
 Explorer and Web Reports servers (`/api/explorers`, `/api/webreports`,
 11.0.7), in both REST states: unprefixed with Explorer stopped,
