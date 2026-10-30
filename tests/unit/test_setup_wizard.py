@@ -446,6 +446,37 @@ async def test_probe_saas_never_retries_a_rejected_login() -> None:
     assert len(server.requests) == 1
 
 
+async def test_probe_saas_blank_password_sends_nothing() -> None:
+    # Sent, an empty password would still be a failed login on the account.
+    server = SaasServer([], {})
+    (result,) = await probe_saas(
+        "login.bigfix.com", EMAIL, "", _no_prompt, transport=server.transport
+    )
+    assert result.status == "auth"
+    assert server.requests == []
+
+
+async def test_probe_saas_signs_in_through_saas_sign_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One sign-in path for the wizard and for apps (issue #34).
+    from bigfix_remote_session_relevance import setup_wizard
+
+    calls: list[str] = []
+    real = setup_wizard.saas_sign_in
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args[0])
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(setup_wizard, "saas_sign_in", spy)
+    server = SaasServer([_saas_login_ok("1", "2")], {"bf1": D5, "bf2": D1})
+    results = await probe_saas(
+        "login.bigfix.com", EMAIL, "pw", _no_prompt, transport=server.transport
+    )
+    assert calls == ["login.bigfix.com"]
+    assert [(r.sid, r.deployment_id) for r in results] == [("bf1", D5), ("bf2", D1)]
+    assert len(server.bodies("/auth/v1/user/login")) == 1
+
+
 def _fake_saas_probe(results: list[ProbeResult]) -> Any:
     async def fake(host: str, email: str, password: str, totp_prompt: Any) -> list[ProbeResult]:
         assert (host, email, password) == ("login.bigfix.com", EMAIL, "pw")

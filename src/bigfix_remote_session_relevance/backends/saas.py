@@ -247,6 +247,15 @@ class SaasBackend(Backend):
             response = await self._post(client, path, data, sid=self.sid)
         return response
 
+    async def sign_in(self) -> ResultError | None:
+        """Sign in now, if not already, without a query; the error if it failed.
+
+        The same single login every request makes first (`servers` is set
+        after it), so it never adds a login: a live session is reused and a
+        rejected one is returned without sending the credentials again.
+        """
+        return await self._with_trust(self._ensure_session)
+
     # -- BigFix Query (fast query) ----------------------------------------------------
 
     async def submit_client_query(

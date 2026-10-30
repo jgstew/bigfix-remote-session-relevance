@@ -44,6 +44,7 @@ from .exceptions import (
 from .paths import data_dir
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .saas_account import SaasAccount, saas_sign_in
 from .server_address import ServerAddress
 from .setup_wizard import run_setup
 from .sync import (
@@ -93,6 +94,7 @@ __all__ = [
     "ResponseFormatError",
     "RestBackend",
     "ResultError",
+    "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
     "ServerAddress",
@@ -117,6 +119,7 @@ __all__ = [
     "evaluate_session_relevance",
     "load_config",
     "run_setup",
+    "saas_sign_in",
     "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",

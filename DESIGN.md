@@ -171,7 +171,7 @@ the bigfix-saas MCP server, which makes the same choices).
 - **Setup:** `--setup` treats an https `login.` / `eulogin.` / `api.` /
   `euapi.` host under `bigfix.com` as SaaS (other allowlisted hosts are
   configured by hand) and asks for an email instead of a username. It signs in
-  **once**, through one `SaasBackend` (so a rejected login is never resent),
+  **once**, through `saas_sign_in` (so a rejected login is never resent),
   prompting for a TOTP code only when the service answers `totp_required`, and
   evaluates `sha256 of gather url of bes license` to record `deployment_id`. A
   rejected sign-in is reported and nothing is saved (saving it would resend
@@ -205,6 +205,22 @@ the bigfix-saas MCP server, which makes the same choices).
   a caller building its own backends (bigfix-remote-client-relevance's Fast
   Query, one `SaasBackend` per target) gets the same one-login-per-account
   behaviour without importing from `backends.*`.
+- **Sign-in for a front end (1.6.0, provisional):** `saas_sign_in(host, email,
+  password, *, totp=None, prompt=None, pool=None)` is the wizard's sign-in
+  without the wizard: it signs in (`SaasBackend.sign_in()`, no query) and
+  returns a `SaasAccount` with the account's `servers` (sid values) or the
+  `error`, never raised. It sends at most one login, two when the service
+  answers `totp_required` and a code is given (`totp`) or asked for
+  (`prompt`); the code goes only in answer to that challenge, as in the
+  wizard, rather than in the first POST. Without either, the error is
+  `authentication` / `totp_required`, so a front end asks for the code and
+  calls again. A blank email or password is refused without sending (it
+  would still count as a failed login). With a `pool`, backends attached to
+  it later reuse the session, and a rejected sign-in cached in it is not sent
+  again. `SaasAccount.connections()` builds one `ConnectionConfig` per server
+  with the wizard's names and `verify = true`, and no password: the caller
+  stores that. `probe_saas` (the wizard) signs in through it and probes over
+  the same pool, so both share one sign-in path.
 
 ### BigFix Explorer
 
