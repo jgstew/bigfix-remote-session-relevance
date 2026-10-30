@@ -220,9 +220,9 @@ Choose how a first-use certificate is decided:
 ```python
 from bigfix_remote_session_relevance import AsyncSessionRelevanceClient, TrustStore
 
-TrustStore(callback=ask_user)            # ask: a sync or async callback gets a CertInfo
-TrustStore(trust_on_first_use=False)     # defer: refuse, and record it in store.pending
-TrustStore(trust_on_first_use="auto")    # auto: pin without asking (logged)
+TrustStore(callback=ask_user)  # ask: a sync or async callback gets a CertInfo
+TrustStore(trust_on_first_use=False)  # defer: refuse, and record it in store.pending
+TrustStore(trust_on_first_use="auto")  # auto: pin without asking (logged)
 ```
 
 **Defer** suits front ends that can't show a dialog in the middle of a
