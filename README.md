@@ -323,7 +323,7 @@ sent, so submit one query per computer. Since 1.5.0,
 the attribute, and `TypeError` for a backend with no ClientQuery API. Ids
 must be positive (`ValueError` otherwise: the service would treat `0` as no
 target, which is every device). A submit also shows up in the operator's
-console history, and failed submits are a bare HTTP 500 that never says why,
+console history, and most failed submits are a bare HTTP 500 that never says why,
 whether the computer id is unknown to the deployment (REST would accept it
 and never answer) or the root server rejects the client relevance.
 

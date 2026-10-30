@@ -38,7 +38,9 @@ captured by hand on 2026-10-26 from one Windows agent (client 11.0.5.204),
 redacted to id `1000001` / `COMPUTER-1`. `results_no_client_context` and
 `results_client_context` are the same fixlet-header expression without and
 with `useClientContext: true`. `submit_500` is a failed create, captured on
-2026-10-27 through bigfix-remote-client-relevance's tests (same agent): the
+2026-10-27 by bigfix-remote-client-relevance through this package's 1.3.0
+`SaasBackend` (same agent; its `create_500.json`, headers `content-type`
+only): the
 identical body for an unknown computer id and for client relevance with a
 control character.
 

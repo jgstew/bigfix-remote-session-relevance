@@ -195,6 +195,7 @@ async def test_submit_server_error_is_a_result_and_never_resent(
 ) -> None:
     # Core submits to the root server before it fails, and answers any
     # upstream failure with a bare 500: a resend could start a second query.
+    # A variant body with no errorMessage (the captured one is tested below).
     bare = httpx.Response(500, json={"status": 500, "message": "Server Error", "data": {}})
     rec = recording_transport([_login_ok(), bare, _created()])
     async with _backend(rec) as b:
@@ -213,7 +214,8 @@ async def test_captured_submit_500_is_an_http_result_and_never_resent(
     recording_transport: type,
 ) -> None:
     # (observed 2026-10-27) The same body for an unknown computer id and for
-    # client relevance with a control character: it never says which.
+    # client relevance with a control character: it never says which. Only the
+    # body was kept; the content-type value here is assumed.
     failed = httpx.Response(
         500,
         text=(CAPTURED / "submit_500.json").read_text(),
