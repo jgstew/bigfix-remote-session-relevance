@@ -7,6 +7,7 @@ The wire tests replay responses captured from an 11.x root server
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from xml.etree.ElementTree import Element
 
@@ -18,6 +19,7 @@ from bigfix_remote_session_relevance.backends.client_query import (
     ClientQueryResponse,
     ClientQueryRow,
     client_query_body,
+    client_query_max_targets,
     supports_client_query,
 )
 from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
@@ -420,3 +422,37 @@ async def test_submit_rejects_non_bool_use_client_context(recording_transport: t
                 use_client_context="false",  # type: ignore[arg-type]
             )
     assert rec.requests == []
+
+
+class _OnlyClientQuery:
+    """A caller's own backend: just the two Protocol methods, no target limit."""
+
+    async def submit_client_query(
+        self,
+        client_relevance: str,
+        computer_ids: Sequence[int],
+        *,
+        use_client_context: bool | None = None,
+    ) -> ClientQueryResponse:
+        raise NotImplementedError
+
+    async def client_query_results(self, query_id: int) -> ClientQueryResponse:
+        raise NotImplementedError
+
+
+def test_client_query_max_targets() -> None:
+    assert client_query_max_targets(RestBackend("h")) is None
+    assert client_query_max_targets(SaasBackend("login.bigfix.com")) == 1
+
+
+def test_client_query_max_targets_is_additive() -> None:
+    # Not a Protocol member, so an implementer without the attribute still counts.
+    fake = _OnlyClientQuery()
+    assert supports_client_query(fake)
+    assert client_query_max_targets(fake) is None
+
+
+@pytest.mark.parametrize("backend", [WebReportsBackend("h"), ExplorerBackend("h"), object()])
+def test_client_query_max_targets_needs_client_query(backend: object) -> None:
+    with pytest.raises(TypeError, match="has no ClientQuery API"):
+        client_query_max_targets(backend)

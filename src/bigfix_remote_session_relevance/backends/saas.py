@@ -164,6 +164,8 @@ class SaasSessionPool:
 class SaasBackend(Backend):
     name = "saas"
     supports_token = False
+    # Fast query targets one computer per query (client_query_max_targets()).
+    client_query_max_targets: int | None = 1
 
     def __init__(
         self,
