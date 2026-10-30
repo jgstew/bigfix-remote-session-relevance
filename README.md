@@ -317,11 +317,22 @@ never answer, so stop polling on your own timeout.
 
 On BigFix SaaS, a query targets **one** computer. Several ids come back as
 an error result (`unsupported_feature` / `multiple_targets`) and nothing is
-sent, so submit one query per computer. Ids must be positive (`ValueError`
-otherwise: the service would treat `0` as no target, which is every
-device). A submit also shows up in the operator's console history, and most
-failed submits are a bare HTTP 500, including client relevance the root
-server rejects.
+sent, so submit one query per computer. Since 1.5.0,
+`client_query_max_targets(backend)` says so before you send: `1` for
+`SaasBackend`, `None` (no limit) for `RestBackend` and for backends without
+the attribute, and `TypeError` for a backend with no ClientQuery API. Ids
+must be positive (`ValueError` otherwise: the service would treat `0` as no
+target, which is every device). A submit also shows up in the operator's
+console history, and most failed submits are a bare HTTP 500 that never says why,
+whether the computer id is unknown to the deployment (REST would accept it
+and never answer) or the root server rejects the client relevance.
+
+To build backends from config the way the clients do, use
+`backend_from_config(conn, trust=...)` (it builds any backend, so check
+`supports_client_query()`), and attach every `SaasBackend` to one
+`SaasSessionPool` (`pool.attach(backend)`, before its first request) so an
+account signs in once and a wrong password costs one failed login, not one
+per backend.
 
 ### Setup from another tool (provisional)
 
@@ -362,7 +373,9 @@ Removing or changing any of these needs a new major version:
 `WebReportsBackend`, `SaasBackend`, `TrustStore`, `KnownCerts` and
 `CertInfo`, (since 1.1.0) the BigFix Query names `ClientQueryExtras`,
 `ClientQueryResponse`, `ClientQueryRow`, `supports_client_query` and
-`run_setup`, and (since 1.4.0) `TrustPolicy` and `ServerAddress`, are public and usable, but may change in a minor release (noted
+`run_setup`, (since 1.4.0) `TrustPolicy` and `ServerAddress`, and (since
+1.5.0) `SaasSessionPool`, `backend_from_config` and
+`client_query_max_targets`, are public and usable, but may change in a minor release (noted
 in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

@@ -4,7 +4,8 @@ Response bodies under tests/fixtures/saas/captured/clientquery/ are real
 (2026-10-26, one Windows agent on client 11.0.5.204, redacted to 1000001 /
 COMPUTER-1): create is core v2 ``clientquery/create`` returning
 ``{"clientQueryId": "2"}``, results are bfproxy v1 ``clientquery/listresults``.
-Synthetic bodies are only for what was not captured (errors, paging).
+submit_500.json is a real failed create (2026-10-27). Synthetic bodies are only
+for what was not captured (other errors, paging).
 """
 
 from __future__ import annotations
@@ -194,6 +195,7 @@ async def test_submit_server_error_is_a_result_and_never_resent(
 ) -> None:
     # Core submits to the root server before it fails, and answers any
     # upstream failure with a bare 500: a resend could start a second query.
+    # A variant body with no errorMessage (the captured one is tested below).
     bare = httpx.Response(500, json={"status": 500, "message": "Server Error", "data": {}})
     rec = recording_transport([_login_ok(), bare, _created()])
     async with _backend(rec) as b:
@@ -206,6 +208,33 @@ async def test_submit_server_error_is_a_result_and_never_resent(
     assert (response.error.kind, response.error.http_status) == ("http", 500)
     assert "root server rejects" in response.error.message
     assert response.query_id is None
+
+
+async def test_captured_submit_500_is_an_http_result_and_never_resent(
+    recording_transport: type,
+) -> None:
+    # (observed 2026-10-27) The same body for an unknown computer id and for
+    # client relevance with a control character: it never says which. Only the
+    # body was kept; the content-type value here is assumed.
+    failed = httpx.Response(
+        500,
+        text=(CAPTURED / "submit_500.json").read_text(),
+        headers={"content-type": "application/json; charset=utf-8"},
+    )
+    rec = recording_transport([_login_ok(), failed, _created()])
+    async with _backend(rec) as b:
+        response = await b.submit_client_query("computer name", [42])
+    posts = [r for r in rec.requests if r.url.path == "/core/v2/clientquery/create"]
+    assert len(posts) == 1
+    assert response.error is not None
+    assert (response.error.kind, response.error.http_status) == ("http", 500)
+    assert response.error.message.startswith("Server Error (")
+    assert response.error.message.endswith(
+        "(BigFix SaaS answers 500 for any failed client query submit, including an"
+        " unknown computer id or client relevance the root server rejects)"
+    )
+    assert response.query_id is None
+    assert response.rows == []
 
 
 async def test_submit_after_expired_session_refreshes_then_resends(

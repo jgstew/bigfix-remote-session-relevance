@@ -164,6 +164,8 @@ class SaasSessionPool:
 class SaasBackend(Backend):
     name = "saas"
     supports_token = False
+    # Fast query targets one computer per query (client_query_max_targets()).
+    client_query_max_targets: int | None = 1
 
     def __init__(
         self,
@@ -466,7 +468,8 @@ def _client_query_data(
                 error,
                 message=(
                     f"{error.message} (BigFix SaaS answers 500 for any failed client query"
-                    " submit, including client relevance the root server rejects)"
+                    " submit, including an unknown computer id or client relevance the"
+                    " root server rejects)"
                 ),
             )
         return error

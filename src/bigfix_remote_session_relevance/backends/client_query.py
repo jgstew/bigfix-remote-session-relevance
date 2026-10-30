@@ -101,8 +101,23 @@ class ClientQueryExtras(Protocol):
     async def client_query_results(self, query_id: int) -> ClientQueryResponse: ...
 
 
+# A backend's target limit is the class attribute ``client_query_max_targets``
+# (RestBackend None, SaasBackend 1), read through `client_query_max_targets()`.
+# It is deliberately not a Protocol member: the Protocol is runtime_checkable,
+# so a new member would stop every existing implementer that lacks it (callers'
+# own backends, test fakes) from counting as ClientQuery-capable.
+
+
 def supports_client_query(backend: object) -> bool:
     return isinstance(backend, ClientQueryExtras)
+
+
+def client_query_max_targets(backend: object) -> int | None:
+    """How many computers one submit_client_query may target; None means no limit."""
+    if not supports_client_query(backend):
+        raise TypeError(f"{type(backend).__name__} has no ClientQuery API")
+    limit: int | None = getattr(backend, "client_query_max_targets", None)
+    return limit
 
 
 # A client query call: (query id, rows so far), or the server's error.

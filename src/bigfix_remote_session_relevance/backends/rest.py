@@ -80,6 +80,8 @@ def encode_session_relevance(session_relevance: str) -> str:
 
 class RestBackend(Backend):
     name = "rest"
+    # One ClientQuery may target any number of computers (client_query_max_targets()).
+    client_query_max_targets: int | None = None
 
     def __init__(self, server: Any, **kwargs: Any) -> None:
         super().__init__(server, **kwargs)
