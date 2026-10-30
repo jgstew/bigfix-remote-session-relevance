@@ -151,6 +151,7 @@ PUBLIC_NAMES = [
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",
+    "__version__",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",

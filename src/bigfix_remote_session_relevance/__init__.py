@@ -52,6 +52,24 @@ from .sync import (
 )
 from .trust import CertInfo, KnownCerts, TrustStore
 
+# Read on first access, not at import: importlib.metadata is otherwise never
+# loaded, and loading it (plus the distribution lookup) is a few ms.
+__version__: str
+
+
+def __getattr__(name: str) -> str:
+    if name != "__version__":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib.metadata
+
+    try:
+        found = importlib.metadata.version("bigfix-remote-session-relevance")
+    except importlib.metadata.PackageNotFoundError:  # a source tree, not installed
+        found = "0+unknown"
+    globals()["__version__"] = found
+    return found
+
+
 __all__ = [
     "ERROR_KINDS",
     "AsyncSessionRelevanceClient",
@@ -87,6 +105,7 @@ __all__ = [
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",
+    "__version__",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
