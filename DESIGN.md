@@ -494,7 +494,7 @@ bundle path.
 2. Otherwise the leaf cert is fetched with a bare handshake (no request, no
    credentials), shown to the trust callback (the CLI prompts with the SHA-256
    fingerprint; prompts are serialized), and pinned in
-   `~/.bigfix/.remote_session_known_certs.toml` (0600, filelock, atomic
+   `.remote_session_known_certs.toml` in the data directory (0600, filelock, atomic
    writes). `trust_on_first_use="auto"` pins without asking and logs a
    WARNING (classic TOFU); `--no-tofu` / `trust_on_first_use=False` refuses.
    With `True` (the default) and no callback, 1.x still auto-pins, with a
@@ -532,7 +532,19 @@ works inside a running event loop.
 
 ## Configuration
 
-`--config`, then `$BFRSR_CONFIG`, then `~/.bigfix/.remote_session_connections.toml`.
+`--config`, then `$BFRSR_CONFIG`, then `.remote_session_connections.toml` in
+the data directory.
+
+The data directory (`paths.data_dir()`) is `$BFRSR_HOME` (blank counts as
+unset, `~` expanded), else `~/.bigfix`, read on every call so an app can set
+it after importing. Every default path is built on it: the connections file,
+the pinned certificates, the local root server's deployment-id cache, and
+any file a later version adds (a persistent SaaS session store, say, or a
+keyring fallback), so one variable keeps covering them all. A specific
+override still wins: `--config` / `$BFRSR_CONFIG` for the connections file,
+a `KnownCerts(path)` for pins. Out of scope: `~/.besapi.conf`, besapi's own
+file, read from the real home.
+
 Read and written with tomlkit. Lenient aliases (`url`/`host`, `type`, `user`,
 `api_key`…) because people write these by hand; unknown keys are warned about,
 not fatal. Validation rejects: duplicate names, unknown backends, bad servers,
@@ -594,7 +606,7 @@ read-only, so these are used without opting in, as besapi does.
   `password` or token: `RESTURL` decides where the credentials go. The
   automatic connection is never written to the file; its discovered
   deployment id is kept, with its server, in
-  `~/.bigfix/.remote_session_local_root_server.toml` (0600) and reused only
+  `.remote_session_local_root_server.toml` in the data directory (0600) and reused only
   for that server.
 
 ## Compatibility

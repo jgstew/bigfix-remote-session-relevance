@@ -41,6 +41,7 @@ from .exceptions import (
     TLSError,
     UnsupportedFeatureError,
 )
+from .paths import data_dir
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .server_address import ServerAddress
@@ -109,6 +110,7 @@ __all__ = [
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
+    "data_dir",
     "default_config_path",
     "escape_answer",
     "escape_result",

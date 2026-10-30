@@ -155,6 +155,7 @@ PUBLIC_NAMES = [
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
+    "data_dir",
     "default_config_path",
     "escape_answer",
     "escape_result",

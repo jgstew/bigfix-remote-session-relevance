@@ -65,7 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--config",
         metavar="PATH",
-        help="config file (default: $BFRSR_CONFIG or ~/.bigfix/.remote_session_connections.toml)",
+        help=(
+            "config file (default: $BFRSR_CONFIG, else .remote_session_connections.toml"
+            " in $BFRSR_HOME or ~/.bigfix)"
+        ),
     )
 
     setup = p.add_argument_group("setup")

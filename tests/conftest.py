@@ -75,6 +75,7 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USERPROFILE", str(home))
     for var in (
         "BFRSR_CONFIG",
+        "BFRSR_HOME",
         "BFRSR_LOCAL_ROOT_SERVER",
         "BES_ROOT_SERVER",
         "BES_USER_NAME",

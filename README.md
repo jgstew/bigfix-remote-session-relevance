@@ -49,6 +49,15 @@ backend over https, plus Web Reports over http. One entered as `https://`
 is probed only over https (Web Reports still on 443 and 8083), and
 `http://` probes only Web Reports.
 
+Every file the library reads or writes (the connections, pinned
+certificates, and the local root server's cached deployment id) lives in
+`~/.bigfix`, or in `$BFRSR_HOME` when that is set. A sandboxed app (iOS,
+Android) sets it once at startup to its own data directory, e.g.
+`os.environ["BFRSR_HOME"] = str(app_support_dir)`; `data_dir()` returns the
+directory in use. `$BFRSR_CONFIG` (or `--config`) still picks the connections
+file itself, and a `KnownCerts(path)` its own pin file. `~/.besapi.conf`,
+which belongs to besapi, is always read from the real home directory.
+
 When the REST API answers, setup also asks the root server for the Explorer
 and Web Reports servers registered with it (`/api/explorers`,
 `/api/webreports`), so ones on other machines can be found. It shows the
@@ -266,7 +275,7 @@ certificate's message now names its fingerprint (still followed by the
 `--trust-cert` hint), and `--no-tofu` fetches the certificate with a bare
 handshake to do so. `--show-certs`,
 `--trust-cert NAME|HOST:PORT` and `--forget-cert HOST:PORT` manage pins in
-`~/.bigfix/.remote_session_known_certs.toml`.
+`.remote_session_known_certs.toml` in `~/.bigfix` (or `$BFRSR_HOME`).
 
 ### BigFix Query (ClientQuery, provisional)
 
@@ -365,7 +374,8 @@ Removing or changing any of these needs a new major version:
 - **Config file:** `schema_version = 1` and the keys and backend names in
   [remote_session_connections.example.toml](remote_session_connections.example.toml),
   where the file is looked for (`--config`, `$BFRSR_CONFIG`,
-  `~/.bigfix/.remote_session_connections.toml`) and `BFRSR_LOCAL_ROOT_SERVER`.
+  `.remote_session_connections.toml` in `$BFRSR_HOME` or `~/.bigfix`) and
+  `BFRSR_LOCAL_ROOT_SERVER`.
   The lenient aliases (`url`, `host`, `user`, `type`, `wr`, …) keep working,
   but may be deprecated, with a warning for at least one minor release first.
 
@@ -387,7 +397,7 @@ config keys they don't know.
 
 Not covered: the plain-text CLI layout and summary, stderr and log messages,
 error message wording, `detail` and `raw` (the server's own text), the
-certificate pin and cache files under `~/.bigfix`, and anything not in
+certificate pin and cache files' formats, and anything not in
 `__all__` (types such as `Pin` or `ServerAddress` that provisional classes
 return or take are provisional with them).
 

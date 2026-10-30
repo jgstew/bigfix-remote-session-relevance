@@ -6,12 +6,12 @@ deployment-CA certificates. In ``verify = "tofu"`` mode (the default):
 1. Normal CA validation is tried first; a CA-valid cert is never pinned.
 2. Otherwise the cert is fetched with a bare handshake (no credentials
    sent), shown to the trust callback (the CLI prompts), and pinned to
-   ``~/.bigfix/.remote_session_known_certs.toml``. A refused cert is kept
-   in `TrustStore.pending`, so a front end can ask after the run and
-   `TrustStore.accept` it (deferred trust). ``trust_on_first_use="auto"``
-   pins without asking and logs, which is classic TOFU; 1.x also does that
-   when no callback is given, with a one-time DeprecationWarning, and 2.0
-   will refuse and record instead.
+   ``.remote_session_known_certs.toml`` in `data_dir` (``~/.bigfix``). A
+   refused cert is kept in `TrustStore.pending`, so a front end can ask
+   after the run and `TrustStore.accept` it (deferred trust).
+   ``trust_on_first_use="auto"`` pins without asking and logs, which is
+   classic TOFU; 1.x also does that when no callback is given, with a
+   one-time DeprecationWarning, and 2.0 will refuse and record instead.
 3. Afterwards the pinned cert is the *only* trust anchor for that
    ``host:port``, so OpenSSL rejects anything else during the handshake,
    before an Authorization header or SOAP password is sent.
@@ -42,6 +42,7 @@ import tomlkit
 from filelock import FileLock
 
 from .backends.base import ca_context, insecure_context
+from .paths import data_dir
 from .result import ResultError
 from .server_address import ServerAddress
 
@@ -55,7 +56,7 @@ _implicit_auto_warned = False
 
 
 def default_known_certs_path() -> Path:
-    return Path.home() / ".bigfix" / ".remote_session_known_certs.toml"
+    return data_dir() / ".remote_session_known_certs.toml"
 
 
 @dataclass(frozen=True)
