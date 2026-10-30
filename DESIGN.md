@@ -200,7 +200,11 @@ the bigfix-saas MCP server, which makes the same choices).
   a SHA-256 digest), so a connection with a different password signs in on
   its own. A `SaasBackend` used directly, without a pool, keeps its own
   session as before. A 5xx answer to the login is not cached (it may be
-  transient), so each waiting connection may try once more.
+  transient), so each waiting connection may try once more. Since 1.5.0
+  `SaasSessionPool` and `backend_from_config` are exported (provisional), so
+  a caller building its own backends (bigfix-remote-client-relevance's Fast
+  Query, one `SaasBackend` per target) gets the same one-login-per-account
+  behaviour without importing from `backends.*`.
 
 ### BigFix Explorer
 
@@ -313,7 +317,25 @@ be-bfproxy-service `src/helpers/requests.js` and `src/v1/routes/clientquery.yaml
   submitted to the root server, so a submit is never resent, except once
   after a 401 (the gateway refusing the cookie before core sees the request,
   the same renewal `evaluate()` does). The 500's message says why it is
-  uninformative. No error bodies are captured yet.
+  uninformative. **(observed 2026-10-27)** through 1.3.0, same agent: a
+  failed submit is HTTP 500 with one fixed body,
+  `{"status":500,"message":"Internal Server Error","data":{"errorMessage":"Server Error"}}`
+  (`clientquery/submit_500.json`), byte for byte the same for two causes: a
+  computer id the deployment does not have (REST accepts it silently and it
+  never answers, so the backends differ here) and client relevance
+  containing a control character (`\x01`). Whether either reached the root
+  server could not be seen from outside. The result is `http` / 500 with
+  message `Server Error (BigFix SaaS answers 500 for any failed client
+  query submit, …)`.
+- Four concurrent submits (one target each) finished in 0.53 s, all accepted
+  and all answered: no throttling and no rate-limit headers (only
+  `content-type`). Larger bursts are untested.
+- `client_query_max_targets(backend)` exposes the one-computer limit before
+  sending: the class attribute `client_query_max_targets` is `1` here and
+  `None` on `RestBackend`. It is read with `getattr` (default `None`), not
+  made a `ClientQueryExtras` member: that Protocol is `runtime_checkable`,
+  so a new member would make every existing implementer without it stop
+  counting as ClientQuery-capable.
 - `client_query_results`: `POST /bfproxy/v1/clientquery/listresults` with
   `data = {queryId: "<id>", start, count: 1000, stats: true}` →
   `{results: [{computerId, computerName, subQueryId, isFailure, result,

@@ -468,7 +468,8 @@ def _client_query_data(
                 error,
                 message=(
                     f"{error.message} (BigFix SaaS answers 500 for any failed client query"
-                    " submit, including client relevance the root server rejects)"
+                    " submit, including an unknown computer id or client relevance the"
+                    " root server rejects)"
                 ),
             )
         return error

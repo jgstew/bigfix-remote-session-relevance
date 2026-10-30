@@ -22,8 +22,8 @@ from .backends.client_query import (
 )
 from .backends.explorer import ExplorerBackend
 from .backends.explorer_extras import ExplorerExtras, supports_explorer_extras
-from .backends.rest import RestBackend
 from .backends.registry import backend_from_config
+from .backends.rest import RestBackend
 from .backends.saas import SaasBackend, SaasSessionPool
 from .backends.webreports import WebReportsBackend
 from .client import AsyncSessionRelevanceClient
