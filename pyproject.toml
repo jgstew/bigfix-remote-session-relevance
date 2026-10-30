@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-remote-session-relevance"
-version = "1.3.0"
+version = "1.4.0"
 description = "Evaluate BigFix session relevance through the REST API, Web Reports SOAP API, or BigFix Explorer, with one common result type."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -94,6 +94,11 @@ testpaths = ["tests"]
 # Tests are isolated (per-test tmp_path HOME, no shared fixed ports), so
 # fanning out across workers is safe.
 addopts = "-n auto"
+# A test must choose trust explicitly: the implicit auto-accept default
+# (issue #30) fails here, except where pytest.warns expects it.
+filterwarnings = [
+  "error:TrustStore with no callback auto-accepts:DeprecationWarning",
+]
 # Everything unmarked runs offline on a bare machine. Marked tests need a real
 # prerequisite and are auto-skipped by tests/conftest.py when it is absent.
 markers = [

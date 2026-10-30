@@ -25,7 +25,8 @@ The session-relevance counterpart to
   (`sha256 of gather url of bes license`), and by default each deployment is
   queried once, concurrently, with failover between its connections.
 - **Trust on first use** for self-signed BigFix certificates: confirm a
-  certificate once and it is pinned. A changed certificate is a hard error.
+  certificate once (now, or later for GUIs) and it is pinned. A changed
+  certificate is a hard error, and no credentials reach it.
 - **Auth:** Basic or bearer token (11.0.6+ "API key") for REST and Explorer,
   mTLS client certificates for Explorer, username/password for Web Reports.
   BigFix SaaS signs in with email/password (TOTP prompted when required).
@@ -202,6 +203,71 @@ could mean client relevance): `result.session_relevance`, the `to_dict()` /
 `--json` key, the error kind, and the `session_relevance=` /
 `session_relevances=` parameters.
 
+### Trust on first use
+
+BigFix servers usually present self-signed certificates. With the default
+`verify = "tofu"`, a certificate no CA vouches for is decided by the
+`TrustStore` passed as `trust=`, and a pinned one is from then on the *only*
+certificate that host:port may present. Either way the decision happens in
+the TLS handshake, before any request: an unpinned certificate that is
+refused, or a pinned host presenting a different one (`tls` /
+`pin_mismatch`), receives nothing after the handshake: no request, no
+`Authorization` header, no Web Reports password. `tests/unit/test_trust.py` proves this against a
+local TLS server that records every byte.
+
+Choose how a first-use certificate is decided:
+
+```python
+from bigfix_remote_session_relevance import AsyncSessionRelevanceClient, TrustStore
+
+TrustStore(callback=ask_user)  # ask: a sync or async callback gets a CertInfo
+TrustStore(trust_on_first_use=False)  # defer: refuse, and record it in store.pending
+TrustStore(trust_on_first_use="auto")  # auto: pin without asking (logged)
+```
+
+**Defer** suits front ends that can't show a dialog in the middle of a
+request (a UI talking to Python over a bridge, or any synchronous caller):
+run, show what was refused, pin what the user confirms, run again.
+
+```python
+store = TrustStore(trust_on_first_use=False)
+async with AsyncSessionRelevanceClient(trust=store) as client:
+    results = await client.evaluate("number of bes computers")
+for host_port, cert in store.pending.items():  # each came back as tls/untrusted
+    if user_confirms(host_port, cert.fingerprint):  # SHA-256, AB:CD:… form
+        store.accept(host_port)  # pins it; KeyError if it isn't pending
+# run again: accepted hosts now connect
+```
+
+A refused certificate comes back as `tls` / `untrusted`, whose message
+names the host:port and, when the store recorded the certificate, its SHA-256
+fingerprint; `detail` keeps the TLS error and the CLI hint (`--trust-cert`).
+The structured certificate is in `store.pending`. `accept()` raises
+`ValueError`, and pins nothing, if the host has meanwhile been pinned to a
+different certificate: replacing a pin stays a deliberate step
+(`--forget-cert` / `KnownCerts.forget`). A callback that declines
+records the certificate in `pending` too. `record_refused=False` turns
+recording off, and with `trust_on_first_use=False` also skips the bare
+handshake that fetches the certificate.
+
+**Auto-accept is opt-in from 1.4.0.** `TrustStore()` with no callback, and
+so `AsyncSessionRelevanceClient()` and `evaluate_session_relevance()` with
+the default `trust`, still pin any first-use certificate, but now emit a
+one-time `DeprecationWarning` asking for one of the choices above. It is
+attributed to your line of code, so Python shows it by default in scripts
+run directly and under pytest; elsewhere enable it with `-W default` or
+`PYTHONWARNINGS=default`. **In 2.0
+the default will refuse and record** (defer). `trust_on_first_use="auto"`
+keeps today's behaviour without the warning; `True` / `False` keep working.
+
+The CLI asks when interactive, pins automatically (`"auto"`) when not, and
+refuses with `--no-tofu`, as before, and never shows the warning. A refused
+certificate's message now names its fingerprint (still followed by the
+`--trust-cert` hint), and `--no-tofu` fetches the certificate with a bare
+handshake to do so. `--show-certs`,
+`--trust-cert NAME|HOST:PORT` and `--forget-cert HOST:PORT` manage pins in
+`~/.bigfix/.remote_session_known_certs.toml`.
+
 ### BigFix Query (ClientQuery, provisional)
 
 `RestBackend` can also send **client** relevance to agents through the root
@@ -220,7 +286,8 @@ from bigfix_remote_session_relevance import (
 )
 
 conn = next(c for c in load_config().connections if c.backend == "rest")
-async with RestBackend.from_config(conn, trust=TrustStore()) as backend:
+store = TrustStore(trust_on_first_use=False)  # or a callback, or "auto"
+async with RestBackend.from_config(conn, trust=store) as backend:
     assert supports_client_query(backend)  # RestBackend and SaasBackend
     submitted = await backend.submit_client_query("computer name", [<COMPUTER_ID>])
     if submitted.ok and submitted.query_id is not None:
@@ -293,9 +360,9 @@ Removing or changing any of these needs a new major version:
 
 **Provisional:** `Backend`, `RestBackend`, `ExplorerBackend`,
 `WebReportsBackend`, `SaasBackend`, `TrustStore`, `KnownCerts` and
-`CertInfo`, and (since 1.1.0) the BigFix Query names `ClientQueryExtras`,
+`CertInfo`, (since 1.1.0) the BigFix Query names `ClientQueryExtras`,
 `ClientQueryResponse`, `ClientQueryRow`, `supports_client_query` and
-`run_setup`, are public and usable, but may change in a minor release (noted
+`run_setup`, and (since 1.4.0) `TrustPolicy` and `ServerAddress`, are public and usable, but may change in a minor release (noted
 in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

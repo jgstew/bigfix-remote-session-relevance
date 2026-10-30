@@ -12,7 +12,7 @@ JSON or XML. By default every configured deployment is queried concurrently.
 
 from __future__ import annotations
 
-from .backends.base import Backend
+from .backends.base import Backend, TrustPolicy
 from .backends.client_query import (
     ClientQueryExtras,
     ClientQueryResponse,
@@ -41,6 +41,7 @@ from .exceptions import (
 )
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .server_address import ServerAddress
 from .setup_wizard import run_setup
 from .sync import (
     SessionRelevanceClient,
@@ -72,12 +73,14 @@ __all__ = [
     "RestBackend",
     "ResultError",
     "SaasBackend",
+    "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
     "SessionRelevanceEvaluationError",
     "SessionRelevanceResult",
     "SessionRelevanceResults",
     "TLSError",
+    "TrustPolicy",
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",

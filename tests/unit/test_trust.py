@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import ssl
@@ -12,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
+from bigfix_remote_session_relevance.backends.base import Backend
+from bigfix_remote_session_relevance.backends.explorer import ExplorerBackend
 from bigfix_remote_session_relevance.backends.rest import RestBackend
+from bigfix_remote_session_relevance.backends.webreports import WebReportsBackend
 from bigfix_remote_session_relevance.trust import (
     CertInfo,
     KnownCerts,
@@ -65,7 +69,7 @@ async def test_first_use_auto_pins_and_logs(
     server = tls_server("self_a")
     known = KnownCerts(tmp_path / "known.toml")
     with caplog.at_level(logging.WARNING):
-        async with _backend(server.port, TrustStore(known)) as backend:
+        async with _backend(server.port, TrustStore(known, trust_on_first_use="auto")) as backend:
             result = await backend.evaluate("1")
     assert result.ok, result.error
     pin = known.get(f"127.0.0.1:{server.port}")
@@ -144,7 +148,7 @@ async def test_pinned_bigfix_style_cert_connects(tls_server, tmp_path: Path) -> 
     server = tls_server("bigfix")
     known = KnownCerts(tmp_path / "known.toml")
     known.pin(await fetch_server_cert("127.0.0.1", server.port), trusted_by="prompt")
-    async with _backend(server.port, TrustStore(known)) as backend:
+    async with _backend(server.port, TrustStore(known, trust_on_first_use="auto")) as backend:
         result = await backend.evaluate("1")
     assert result.ok, result.error
 
@@ -153,7 +157,7 @@ async def test_pinned_cert_that_stops_validating_says_why(tls_server, tmp_path: 
     server = tls_server("expired")
     known = KnownCerts(tmp_path / "known.toml")
     known.pin(await fetch_server_cert("127.0.0.1", server.port), trusted_by="prompt")
-    async with _backend(server.port, TrustStore(known)) as backend:
+    async with _backend(server.port, TrustStore(known, trust_on_first_use="auto")) as backend:
         result = await backend.evaluate("1")
     assert result.error is not None
     assert result.error.code == "pinned_cert_invalid"
@@ -257,7 +261,7 @@ def test_known_certs_forget_and_all(tmp_path: Path) -> None:
 async def test_client_query_pins_on_first_use(tls_server, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     server = tls_server("self_a")
     known = KnownCerts(tmp_path / "known.toml")
-    async with _backend(server.port, TrustStore(known)) as backend:
+    async with _backend(server.port, TrustStore(known, trust_on_first_use="auto")) as backend:
         submitted = await backend.submit_client_query("computer name", [1])
         fetched = await backend.client_query_results(7)
     assert submitted.ok, submitted.error
@@ -292,3 +296,157 @@ async def test_client_query_refuses_changed_cert(  # type: ignore[no-untyped-def
         assert response.error is not None
         assert (response.error.kind, response.error.code) == ("tls", "pin_mismatch")
     assert impostor.requests == []
+
+
+# -- deferred trust against a real handshake ----------------------------------------
+
+
+async def test_untrusted_message_names_host_and_fingerprint(  # type: ignore[no-untyped-def]
+    tls_server, tls_certs, tmp_path: Path
+) -> None:
+    server = tls_server("self_a")
+    store = TrustStore(KnownCerts(tmp_path / "known.toml"), callback=lambda info: False)
+    async with _backend(server.port, store) as backend:
+        result = await backend.evaluate("1")
+    error = result.error
+    assert error is not None
+    assert (error.kind, error.code) == ("tls", "untrusted")
+    host_port = f"127.0.0.1:{server.port}"
+    info = store.pending[host_port]
+    assert info.sha256 == _fingerprint(tls_certs["self_a_pem"])
+    assert host_port in error.message
+    assert info.fingerprint in error.message
+    # Front-end neutral: the CLI's flag is only a hint in detail.
+    assert "--trust-cert" not in error.message
+    assert error.detail is not None
+    assert f"--trust-cert {host_port}" in error.detail
+
+
+async def test_untrusted_message_without_a_recorded_cert(  # type: ignore[no-untyped-def]
+    tls_server, tmp_path: Path
+) -> None:
+    server = tls_server("self_a")
+    store = TrustStore(
+        KnownCerts(tmp_path / "known.toml"), trust_on_first_use=False, record_refused=False
+    )
+    async with _backend(server.port, store) as backend:
+        result = await backend.evaluate("1")
+    assert result.error is not None
+    assert result.error.code == "untrusted"
+    assert f"127.0.0.1:{server.port}" in result.error.message
+    assert "SHA-256" not in result.error.message
+    assert "--trust-cert" not in result.error.message
+
+
+async def test_defer_then_accept_then_connects(tls_server, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    server = tls_server("self_a")
+    known = KnownCerts(tmp_path / "known.toml")
+    store = TrustStore(known, trust_on_first_use=False)
+    host_port = f"127.0.0.1:{server.port}"
+    async with _backend(server.port, store) as backend:
+        first = await backend.evaluate("1")
+    assert first.error is not None
+    assert first.error.code == "untrusted"
+    assert server.requests == []
+    assert list(store.pending) == [host_port]
+
+    pin = store.accept(host_port)
+    assert pin.trusted_by == "prompt"
+    async with _backend(server.port, store) as backend:
+        second = await backend.evaluate("1")
+    assert second.ok, second.error
+    assert server.requests[0][1] is not None  # credentials only once pinned
+
+
+# -- pin before credentials (issue test 4) --------------------------------------------
+
+_SECRET = "s3cret-pw-do-not-send"
+_BACKENDS = [RestBackend, ExplorerBackend, WebReportsBackend]
+
+
+def _raw_backend(cls: type[Backend], port: int, store: TrustStore) -> Backend:
+    return cls(
+        f"127.0.0.1:{port}",
+        username="op",
+        password=_SECRET,
+        verify="tofu",
+        trust=store,
+        connect_timeout=5,
+        read_timeout=10,
+    )
+
+
+def _credential_markers() -> list[bytes]:
+    basic = base64.b64encode(f"op:{_SECRET}".encode())
+    return [basic, _SECRET.encode(), b"authorization", b"Authorization"]
+
+
+def _refusing_stores(known: KnownCerts) -> dict[str, TrustStore]:
+    return {
+        "declined": TrustStore(known, callback=lambda info: False),
+        "tofu-off": TrustStore(known, trust_on_first_use=False),
+    }
+
+
+@pytest.mark.parametrize("refusal", ["declined", "tofu-off"])
+@pytest.mark.parametrize("cls", _BACKENDS, ids=lambda c: c.name)
+async def test_unpinned_refused_cert_receives_no_bytes(  # type: ignore[no-untyped-def]
+    raw_tls_server, tmp_path: Path, cls: type[Backend], refusal: str
+) -> None:
+    server = raw_tls_server("self_a")
+    known = KnownCerts(tmp_path / "known.toml")
+    store = _refusing_stores(known)[refusal]
+    async with _raw_backend(cls, server.port, store) as backend:
+        result = await backend.evaluate("1")
+    assert result.error is not None
+    assert (result.error.kind, result.error.code) == ("tls", "untrusted")
+    # The backend's own attempt reached this server and was refused in the
+    # handshake (the bare certificate fetch alone would also connect).
+    assert any(not c["handshake_ok"] for c in server.connections)
+    # Not one byte after any handshake: no request line, no Authorization
+    # header, no login or SOAP body. The only handshake that completed is
+    # the bare certificate fetch, which sends nothing.
+    assert server.received == b""
+    assert known.all() == []
+
+
+@pytest.mark.parametrize("cls", _BACKENDS, ids=lambda c: c.name)
+async def test_pinned_to_other_cert_receives_no_bytes(  # type: ignore[no-untyped-def]
+    raw_tls_server, tls_server, tmp_path: Path, cls: type[Backend]
+) -> None:
+    other = tls_server("self_a")
+    info_a = await fetch_server_cert("127.0.0.1", other.port)
+    impostor = raw_tls_server("self_b")
+    known = KnownCerts(tmp_path / "known.toml")
+    known.pin(
+        CertInfo(host_port=f"127.0.0.1:{impostor.port}", sha256=info_a.sha256, pem=info_a.pem),
+        trusted_by="prompt",
+    )
+
+    def never(info: CertInfo) -> bool:
+        raise AssertionError("a changed cert must never prompt")
+
+    store = TrustStore(known, callback=never)
+    async with _raw_backend(cls, impostor.port, store) as backend:
+        result = await backend.evaluate("1")
+    assert result.error is not None
+    assert (result.error.kind, result.error.code) == ("tls", "pin_mismatch")
+    assert any(not c["handshake_ok"] for c in impostor.connections)
+    assert not any(c["handshake_ok"] and c["data"] for c in impostor.connections)
+    assert impostor.received == b""
+    assert store.pending == {}  # a changed cert is never offered for acceptance
+
+
+@pytest.mark.parametrize("cls", _BACKENDS, ids=lambda c: c.name)
+async def test_correct_pin_does_send_credentials(  # type: ignore[no-untyped-def]
+    raw_tls_server, tmp_path: Path, cls: type[Backend]
+) -> None:
+    # The positive control: the recording server does see credentials once
+    # the handshake verifies, so the two tests above can fail.
+    server = raw_tls_server("self_a")
+    known = KnownCerts(tmp_path / "known.toml")
+    known.pin(await fetch_server_cert("127.0.0.1", server.port), trusted_by="prompt")
+    store = TrustStore(known, trust_on_first_use=False)
+    async with _raw_backend(cls, server.port, store) as backend:
+        await backend.evaluate("1")
+    assert any(marker in server.received for marker in _credential_markers())

@@ -277,3 +277,26 @@ def test_exit_codes_are_the_documented_values() -> None:
         render.EXIT_PARTIAL,
         render.EXIT_USAGE,
     ) == (0, 1, 2, 3, 64)
+
+
+def test_untrusted_error_keeps_the_cli_hint() -> None:
+    # The library message is front-end neutral; the CLI adds its own flag.
+    r = SessionRelevanceResult.failure(
+        "1",
+        ResultError(
+            kind="tls",
+            code="untrusted",
+            message="certificate for h:52311 is not trusted yet (SHA-256 AB:CD); confirm it to pin it",
+        ),
+    ).replace(connection="dev-root")
+    assert format_error(r) == (
+        "dev-root: tls error: certificate for h:52311 is not trusted yet (SHA-256 AB:CD); "
+        "confirm it to pin it (trust it with --trust-cert dev-root)"
+    )
+
+
+def test_other_tls_errors_get_no_hint() -> None:
+    r = SessionRelevanceResult.failure(
+        "1", ResultError(kind="tls", code="pin_mismatch", message="changed")
+    ).replace(connection="dev-root")
+    assert format_error(r) == "dev-root: tls error: changed"

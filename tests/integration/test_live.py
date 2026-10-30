@@ -101,7 +101,7 @@ async def _client(
         load_config(live_config_path),
         mode="all",
         backends=[backend],
-        trust=TrustStore(KnownCerts(tmp_path / "known.toml")),
+        trust=TrustStore(KnownCerts(tmp_path / "known.toml"), trust_on_first_use="auto"),
         record_deployment_ids=False,
     )
 
@@ -182,7 +182,7 @@ async def test_live_client_query_round_trip(live_config_path: Path, tmp_path: Pa
         for c in load_config(live_config_path).connections
         if c.enabled and c.backend == "rest" and (wanted is None or c.name == wanted)
     )
-    trust = TrustStore(KnownCerts(tmp_path / "known.toml"))
+    trust = TrustStore(KnownCerts(tmp_path / "known.toml"), trust_on_first_use="auto")
     async with RestBackend.from_config(conn, trust=trust) as backend:
         submitted = await backend.submit_client_query("computer name", [int(computer_id)])
         assert submitted.ok, submitted.error

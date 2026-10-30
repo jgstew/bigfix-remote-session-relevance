@@ -550,3 +550,62 @@ def test_tolerate_unencodable_ignores_closed_or_detached_streams() -> None:
     detached = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
     detached.detach()
     cli._tolerate_unencodable(detached)
+
+
+@pytest.fixture
+def built_stores(monkeypatch: pytest.MonkeyPatch) -> list[cli.TrustStore]:
+    """Every TrustStore the CLI builds."""
+    stores: list[cli.TrustStore] = []
+
+    class Recording(cli.TrustStore):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            stores.append(self)
+
+    monkeypatch.setattr(cli, "TrustStore", Recording)
+    return stores
+
+
+_OK_ROUTES = {
+    "dev-root": httpx.Response(200, json={"result": ["x"], "plural": False, "type": "string"}),
+    "dev-wr": _wr(),
+}
+
+
+def test_non_interactive_trust_is_explicit_auto(
+    config_path: Path, built_stores: list[cli.TrustStore], recwarn: pytest.WarningsRecorder
+) -> None:
+    assert _run(["1"], _OK_ROUTES, interactive=False) == 0
+    (store,) = built_stores
+    assert store.trust_on_first_use == "auto"
+    assert store.callback is None
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
+def test_interactive_trust_asks(
+    config_path: Path, built_stores: list[cli.TrustStore], recwarn: pytest.WarningsRecorder
+) -> None:
+    answers: list[str] = []
+
+    def ask(prompt: str) -> str:
+        answers.append(prompt)
+        return "n"
+
+    assert _run(["1"], _OK_ROUTES, interactive=True, input_fn=ask) == 0
+    (store,) = built_stores
+    assert store.trust_on_first_use is True
+    assert store.callback is not None
+    info = CertInfo(host_port="root.example.com:52311", sha256="ab" * 32, pem="PEM")
+    assert store.callback(info) is False
+    assert answers == ["Trust and pin this certificate? [y/N] "]
+    assert not [w for w in recwarn if issubclass(w.category, DeprecationWarning)]
+
+
+@pytest.mark.parametrize("interactive", [True, False])
+def test_no_tofu_refuses(
+    config_path: Path, built_stores: list[cli.TrustStore], interactive: bool
+) -> None:
+    assert _run(["--no-tofu", "1"], _OK_ROUTES, interactive=interactive) == 0
+    (store,) = built_stores
+    assert store.trust_on_first_use is False
+    assert store.callback is None

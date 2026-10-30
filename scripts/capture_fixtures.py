@@ -176,7 +176,7 @@ def main() -> int:
     if not connections:
         print("no enabled connections", file=sys.stderr)
         return 1
-    trust = TrustStore(KnownCerts())
+    trust = TrustStore(KnownCerts(), trust_on_first_use="auto")
     captured = asyncio.run(_capture_all(connections, trust, only))
 
     hosts: set[str] = {c.address.host for c in connections}

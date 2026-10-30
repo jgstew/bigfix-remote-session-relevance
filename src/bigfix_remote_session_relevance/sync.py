@@ -33,6 +33,7 @@ from .backends.explorer_extras import explorer_body
 from .client import AsyncSessionRelevanceClient
 from .result import SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .trust import TrustStore
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -44,6 +45,10 @@ class SessionRelevanceClient:
     """Same API as `AsyncSessionRelevanceClient`, as plain methods."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if "trust" not in kwargs:
+            # The default store, built here rather than on the portal thread,
+            # so its auto-accept DeprecationWarning names the caller's line.
+            kwargs["trust"] = TrustStore()
         portal, thread = _start_portal_thread()
         self._portal: BlockingPortal | None = portal
         try:

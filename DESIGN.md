@@ -473,13 +473,34 @@ bundle path.
    credentials), shown to the trust callback (the CLI prompts with the SHA-256
    fingerprint; prompts are serialized), and pinned in
    `~/.bigfix/.remote_session_known_certs.toml` (0600, filelock, atomic
-   writes). The library with no callback pins automatically and logs a
+   writes). `trust_on_first_use="auto"` pins without asking and logs a
    WARNING (classic TOFU); `--no-tofu` / `trust_on_first_use=False` refuses.
+   With `True` (the default) and no callback, 1.x still auto-pins, with a
+   one-time `DeprecationWarning` pointing at the first caller outside the
+   package; 2.0 will refuse and record instead. The CLI passes `"auto"` when
+   not interactive, so it never warns.
 3. A pinned host gets an `SSLContext` whose only trust anchor is the pinned
    cert (`VERIFY_X509_PARTIAL_CHAIN`, no hostname check, because BigFix certs
    rarely match the URL). OpenSSL rejects any other cert during the
    handshake, before any Authorization header or SOAP password is sent.
-   `tests/unit/test_trust.py` proves this against a real local TLS server.
+   `tests/unit/test_trust.py` proves this against a real local TLS server,
+   for REST, Explorer and Web Reports, with a server that records every byte
+   after the handshake (and a positive control that does see credentials).
+4. Deferred trust: every refused first-use cert (callback declined, or
+   `trust_on_first_use=False`, which fetches it with a bare handshake
+   unless `record_refused=False`) is kept in `TrustStore.pending` by
+   host:port; `TrustStore.accept(host_port)` pins it (`trusted_by="prompt"`,
+   `KeyError` if not pending, `ValueError` if the host was pinned to a
+   different cert meanwhile, so a stale record never replaces a pin). An
+   entry is dropped once the host is pinned or a later fetch fails, so the
+   message never shows a stale fingerprint. The sync client builds its
+   default store on the caller's thread so the warning names the caller. A pin mismatch is never recorded: it is not a
+   first use. The `tls` / `untrusted` message is front-end neutral: it names
+   the host:port and, when pending holds it, the SHA-256 fingerprint;
+   `detail` carries the TLS error and the CLI's `--trust-cert` hint.
+   There is deliberately no `ResultError.cert_sha256`: the store a front end
+   must call `accept()` on already holds the full `CertInfo` (PEM too), and
+   a result field would grow the public result contract for one error code.
 
 ## Async and sync
 
