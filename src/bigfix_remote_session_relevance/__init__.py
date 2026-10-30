@@ -17,12 +17,14 @@ from .backends.client_query import (
     ClientQueryExtras,
     ClientQueryResponse,
     ClientQueryRow,
+    client_query_max_targets,
     supports_client_query,
 )
 from .backends.explorer import ExplorerBackend
 from .backends.explorer_extras import ExplorerExtras, supports_explorer_extras
 from .backends.rest import RestBackend
-from .backends.saas import SaasBackend
+from .backends.registry import backend_from_config
+from .backends.saas import SaasBackend, SaasSessionPool
 from .backends.webreports import WebReportsBackend
 from .client import AsyncSessionRelevanceClient
 from .config import Config, ConnectionConfig, default_config_path, load_config
@@ -73,6 +75,7 @@ __all__ = [
     "RestBackend",
     "ResultError",
     "SaasBackend",
+    "SaasSessionPool",
     "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
@@ -85,6 +88,8 @@ __all__ = [
     "UnsupportedFeatureError",
     "WebReportsBackend",
     "async_evaluate_session_relevance",
+    "backend_from_config",
+    "client_query_max_targets",
     "default_config_path",
     "escape_answer",
     "escape_result",

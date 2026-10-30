@@ -139,6 +139,7 @@ PUBLIC_NAMES = [
     "RestBackend",
     "ResultError",
     "SaasBackend",
+    "SaasSessionPool",
     "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
@@ -151,6 +152,8 @@ PUBLIC_NAMES = [
     "UnsupportedFeatureError",
     "WebReportsBackend",
     "async_evaluate_session_relevance",
+    "backend_from_config",
+    "client_query_max_targets",
     "default_config_path",
     "escape_answer",
     "escape_result",
@@ -186,7 +189,25 @@ PROVISIONAL = {
     # 1.4.0: so callers can type their own trust policies (issue #30).
     "ServerAddress",
     "TrustPolicy",
+    # 1.5.0: for bigfix-remote-client-relevance's Fast Query (issue #28).
+    "SaasSessionPool",
+    "backend_from_config",
+    "client_query_max_targets",
 }
+
+
+def test_client_relevance_imports_resolve() -> None:
+    # What bigfix-remote-client-relevance imports from the top level (issue #28).
+    from bigfix_remote_session_relevance import (
+        SaasSessionPool,
+        backend_from_config,
+        client_query_max_targets,
+    )
+    from bigfix_remote_session_relevance.backends import client_query, registry, saas
+
+    assert SaasSessionPool is saas.SaasSessionPool
+    assert backend_from_config is registry.backend_from_config
+    assert client_query_max_targets is client_query.client_query_max_targets
 
 
 def test_provisional_names_are_public_names() -> None:

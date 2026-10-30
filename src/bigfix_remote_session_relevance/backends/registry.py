@@ -28,6 +28,12 @@ def backend_from_config(
     prompt: Callable[[str], str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> Backend:
+    """The backend a configured connection names, built from its settings.
+
+    It builds any backend (REST, Explorer, Web Reports, BigFix SaaS), so check
+    `supports_client_query()` before using one for ClientQuery, and
+    `client_query_max_targets()` for how many computers one query may target.
+    """
     return BACKEND_CLASSES[conn.backend].from_config(
         conn, trust=trust, prompt=prompt, transport=transport
     )
