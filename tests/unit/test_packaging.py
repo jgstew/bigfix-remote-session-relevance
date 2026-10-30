@@ -74,9 +74,13 @@ def test_import_does_not_read_package_metadata() -> None:
     # importlib.metadata is not otherwise imported, and loading it (and
     # scanning sys.path for the distribution) costs several ms: a GUI or CLI
     # that never asks for __version__ should not pay for it.
+    # If Python itself (or a dependency) already loaded it, only check that
+    # the lookup waits for the first access.
     code = (
-        "import sys, bigfix_remote_session_relevance as p; "
-        "assert 'importlib.metadata' not in sys.modules, 'imported eagerly'; "
+        "import sys; preloaded = 'importlib.metadata' in sys.modules; "
+        "import bigfix_remote_session_relevance as p; "
+        "assert '__version__' not in vars(p), 'read eagerly'; "
+        "assert preloaded or 'importlib.metadata' not in sys.modules, 'imported eagerly'; "
         "p.__version__; assert 'importlib.metadata' in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)  # noqa: S603

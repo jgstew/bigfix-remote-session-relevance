@@ -224,7 +224,8 @@ async def probe_saas(
     )
     if account.error is not None:
         return [ProbeResult("saas", host, _status(account.error), None, account.error.message)]
-    backend = new_saas_backend(host, email, password, transport=transport)
+    # The prompt too, in case the session must be renewed mid-probe.
+    backend = new_saas_backend(host, email, password, totp_prompt=totp_prompt, transport=transport)
     pool.attach(backend)
     async with backend:
         if len(account.servers) <= 1:

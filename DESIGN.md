@@ -214,7 +214,11 @@ the bigfix-saas MCP server, which makes the same choices).
   (`prompt`); the code goes only in answer to that challenge, as in the
   wizard, rather than in the first POST. Without either, the error is
   `authentication` / `totp_required`, so a front end asks for the code and
-  calls again. A blank email or password is refused without sending (it
+  calls again, with the same pool too: `SaasBackend.sign_in()` on a backend
+  that has a TOTP prompt drops a cached `totp_required` (the password was
+  accepted, so that login answers the challenge rather than resending a
+  rejection), while a rejected code (`mfa_mismatch`) stays cached like any
+  rejection. A blank email or password is refused without sending (it
   would still count as a failed login). With a `pool`, backends attached to
   it later reuse the session, and a rejected sign-in cached in it is not sent
   again. `SaasAccount.connections()` builds one `ConnectionConfig` per server

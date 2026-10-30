@@ -85,18 +85,23 @@ async def saas_sign_in(
     ``totp`` answers the service's MFA challenge with a code the caller
     already has; ``prompt`` asks for one only if challenged. With neither, an
     MFA account comes back as ``authentication`` / ``totp_required``, so a
-    front end can ask for the code and call again. ``pool``: backends later
-    attached to the same `SaasSessionPool` reuse this sign-in (and a
-    rejected one is never sent again through it).
+    front end can ask for the code and call again (with the same ``pool``
+    too: a pending challenge is not kept as a rejection). ``prompt`` is
+    called synchronously, on the event loop, and whatever it raises (a
+    cancelled dialog, say) propagates (async prompts are not supported yet). ``pool``:
+    backends later attached to the same `SaasSessionPool` reuse this sign-in,
+    and a rejected one (a wrong password or TOTP code) is never sent again
+    through it. ``email`` is stripped.
 
     Raises only for caller bugs: a host that is not BigFix SaaS (`ConfigError`,
     before anything is sent) or both ``totp`` and ``prompt``.
     """
     if totp is not None and prompt is not None:
         raise ValueError("give totp or prompt, not both")
+    email = email.strip()
     totp_prompt = _answer(totp) if totp is not None else prompt
     backend = new_saas_backend(host, email, password, totp_prompt=totp_prompt, transport=transport)
-    if not email.strip() or not password:
+    if not email or not password:
         # Sent, an empty email or password would still count as a failed login.
         blank = ResultError(
             kind="authentication",

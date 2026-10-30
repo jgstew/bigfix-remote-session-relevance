@@ -318,3 +318,55 @@ def test_exported() -> None:
     assert pkg.saas_sign_in is saas_sign_in
     assert pkg.SaasAccount is SaasAccount
     assert {"saas_sign_in", "SaasAccount"} <= set(pkg.__all__)
+
+
+async def test_pool_lets_a_front_end_answer_the_totp_challenge_on_the_next_call() -> None:
+    # The documented flow: sign in, get totp_required, ask for the code, call
+    # again. The challenge is not a rejection, so the pool must not keep it.
+    server = SaasServer(_login_fail("totp_required"), _login_fail("totp_required"), _login_ok("1"))
+    pool = SaasSessionPool()
+    first = await saas_sign_in(
+        "login.bigfix.com", EMAIL, "pw", pool=pool, transport=server.transport
+    )
+    assert first.error is not None
+    assert first.error.code == "totp_required"
+    second = await saas_sign_in(
+        "login.bigfix.com", EMAIL, "pw", totp="123456", pool=pool, transport=server.transport
+    )
+    assert second.ok
+    assert second.servers == ("bf1",)
+    assert [("totp" in b) for b in server.bodies(LOGIN_PATH)] == [False, False, True]
+
+
+async def test_pool_still_holds_totp_required_without_a_code() -> None:
+    # Calling again with no code cannot answer the challenge: send nothing.
+    server = SaasServer(_login_fail("totp_required"))
+    pool = SaasSessionPool()
+    for _ in range(3):
+        account = await saas_sign_in(
+            "login.bigfix.com", EMAIL, "pw", pool=pool, transport=server.transport
+        )
+        assert account.error is not None
+    assert len(server.requests) == 1
+
+
+async def test_pool_keeps_a_rejected_totp_code() -> None:
+    # A wrong code may count as a failed login: never resent through the pool.
+    server = SaasServer(_login_fail("totp_required"), _login_fail("mfa_mismatch"))
+    pool = SaasSessionPool()
+    for code in ("000000", "111111"):
+        account = await saas_sign_in(
+            "login.bigfix.com", EMAIL, "pw", totp=code, pool=pool, transport=server.transport
+        )
+        assert account.error is not None
+        assert account.error.code == "mfa_mismatch"
+    assert len(server.requests) == 2
+
+
+async def test_email_is_sent_stripped() -> None:
+    server = SaasServer(_login_ok("1"))
+    account = await saas_sign_in(
+        "login.bigfix.com", f"  {EMAIL} ", "pw", transport=server.transport
+    )
+    assert account.email == EMAIL
+    assert server.bodies(LOGIN_PATH)[0]["email"] == EMAIL

@@ -253,7 +253,21 @@ class SaasBackend(Backend):
         The same single login every request makes first (`servers` is set
         after it), so it never adds a login: a live session is reused and a
         rejected one is returned without sending the credentials again.
+
+        The one exception: a cached ``totp_required`` (another backend on the
+        session had no way to answer the challenge) is dropped when this one
+        has a TOTP prompt. The password was accepted, so the login it sends
+        is the challenge being answered, not a rejected login resent. A
+        rejected code (``mfa_mismatch``) stays cached like any rejection.
         """
+        failure = self._session.failure
+        if (
+            failure is not None
+            and failure.code == "totp_required"
+            and self._totp_prompt is not None
+            and self._session.until is None
+        ):
+            self._session.failure = None
         return await self._with_trust(self._ensure_session)
 
     # -- BigFix Query (fast query) ----------------------------------------------------
