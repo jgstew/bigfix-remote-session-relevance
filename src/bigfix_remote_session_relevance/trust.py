@@ -259,13 +259,18 @@ class TrustStore:
         lock = self._locks.setdefault(address.host_port, asyncio.Lock())
         async with lock:
             if self.is_pinned(address):
-                return True  # another connection pinned it while we waited
+                # Another connection (or process) pinned it while we waited;
+                # a refused cert recorded earlier is stale now.
+                self.pending.pop(address.host_port, None)
+                return True
             if self.trust_on_first_use is False and not self.record_refused:
                 return False
             try:
                 info = await fetch_server_cert(address.host, address.port)
             except (OSError, ssl.SSLError, TimeoutError) as exc:
                 log.warning("cannot fetch certificate from %s: %s", address.host_port, exc)
+                # Don't let an old record stand in for a cert nobody saw now.
+                self.pending.pop(address.host_port, None)
                 return False
             if self.trust_on_first_use is False:
                 accepted = False
@@ -297,13 +302,26 @@ class TrustStore:
     def accept(self, host_port: str, *, trusted_by: str = "prompt") -> Pin:
         """Pin a pending certificate, once the user has confirmed its fingerprint.
 
-        Raises KeyError if ``host_port`` isn't pending. The pin is exactly the
-        certificate that was refused, so if the server presents another one
-        by the next run, that run fails with ``pin_mismatch``.
+        Raises KeyError if ``host_port`` isn't pending, and ValueError if it
+        has since been pinned to a different certificate: replacing a pin is
+        what ``pin_mismatch`` makes deliberate (``--trust-cert``), so a stale
+        record never does it. The pin is exactly the certificate that was
+        refused, so if the server presents another one by the next run, that
+        run fails with ``pin_mismatch``.
         """
         info = self.pending[host_port]
+        existing = self.known.get(host_port)
+        if existing is not None and existing.sha256 != info.sha256:
+            del self.pending[host_port]
+            raise ValueError(
+                f"{host_port} is already pinned to another certificate "
+                f"(sha256 {existing.sha256[:16]}…); forget that pin first to replace it"
+            )
         pin = self.known.pin(info, trusted_by=trusted_by)
-        del self.pending[host_port]
+        # The client's loop may have recorded a newer refusal meanwhile; that
+        # one the user hasn't seen, so it stays pending.
+        if self.pending.get(host_port) is info:
+            del self.pending[host_port]
         return pin
 
     async def mismatch_error(self, address: ServerAddress, backend: str) -> ResultError:

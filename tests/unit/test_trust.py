@@ -400,7 +400,9 @@ async def test_unpinned_refused_cert_receives_no_bytes(  # type: ignore[no-untyp
         result = await backend.evaluate("1")
     assert result.error is not None
     assert (result.error.kind, result.error.code) == ("tls", "untrusted")
-    assert server.connections, "the client never connected, so this proves nothing"
+    # The backend's own attempt reached this server and was refused in the
+    # handshake (the bare certificate fetch alone would also connect).
+    assert any(not c["handshake_ok"] for c in server.connections)
     # Not one byte after any handshake: no request line, no Authorization
     # header, no login or SOAP body. The only handshake that completed is
     # the bare certificate fetch, which sends nothing.
@@ -429,7 +431,7 @@ async def test_pinned_to_other_cert_receives_no_bytes(  # type: ignore[no-untype
         result = await backend.evaluate("1")
     assert result.error is not None
     assert (result.error.kind, result.error.code) == ("tls", "pin_mismatch")
-    assert impostor.connections, "the client never connected, so this proves nothing"
+    assert any(not c["handshake_ok"] for c in impostor.connections)
     assert not any(c["handshake_ok"] and c["data"] for c in impostor.connections)
     assert impostor.received == b""
     assert store.pending == {}  # a changed cert is never offered for acceptance

@@ -215,3 +215,101 @@ def test_trust_store_satisfies_trust_policy(tmp_path: Path) -> None:
 
     policy: TrustPolicy = TrustStore(_known(tmp_path), trust_on_first_use=False)
     assert not policy.is_pinned(ADDRESS)
+
+
+# -- review hardening ---------------------------------------------------------------
+
+
+def test_sync_client_warning_points_at_the_caller() -> None:
+    # The sync facade builds its async client on a portal thread; the
+    # warning must still name the caller's line, not anyio's.
+    from bigfix_remote_session_relevance import SessionRelevanceClient
+
+    with pytest.warns(DeprecationWarning) as record:
+        client = SessionRelevanceClient(connections=[])
+    client.close()
+    assert record[0].filename == __file__
+
+
+def test_sync_client_passes_its_trust_through() -> None:
+    from bigfix_remote_session_relevance import SessionRelevanceClient
+
+    with pytest.warns(DeprecationWarning):
+        client = SessionRelevanceClient(connections=[])
+    try:
+        assert isinstance(client._client._trust, TrustStore)
+    finally:
+        client.close()
+    explicit = SessionRelevanceClient(connections=[], trust=None)
+    try:
+        assert explicit._client._trust is None
+    finally:
+        explicit.close()
+
+
+def test_accept_refuses_to_replace_a_different_pin(tmp_path: Path) -> None:
+    # Pinned to B since A was refused (another process, or --trust-cert after
+    # a rotation): accepting the stale A must not silently replace B.
+    store = TrustStore(_known(tmp_path), trust_on_first_use=False)
+    store.pending[INFO.host_port] = INFO
+    other = CertInfo(host_port=INFO.host_port, sha256="cd" * 32, pem="PEM-B")
+    store.known.pin(other, trusted_by="prompt")
+    with pytest.raises(ValueError, match="already pinned"):
+        store.accept(INFO.host_port)
+    pin = store.known.get(INFO.host_port)
+    assert pin is not None
+    assert pin.sha256 == other.sha256
+    assert INFO.host_port not in store.pending
+
+
+def test_accept_of_the_same_pin_is_harmless(tmp_path: Path) -> None:
+    store = TrustStore(_known(tmp_path), trust_on_first_use=False)
+    store.pending[INFO.host_port] = INFO
+    store.known.pin(INFO, trusted_by="wizard")
+    assert store.accept(INFO.host_port).sha256 == INFO.sha256
+    assert store.pending == {}
+
+
+async def test_pinned_meanwhile_drops_the_stale_pending_entry(
+    tmp_path: Path, fetches: list[str]
+) -> None:
+    store = TrustStore(_known(tmp_path), trust_on_first_use=False)
+    await store.on_untrusted(ADDRESS)
+    store.known.pin(CertInfo(INFO.host_port, "cd" * 32, "PEM-B"), trusted_by="prompt")
+    assert await store.on_untrusted(ADDRESS) is True
+    assert store.pending == {}
+
+
+async def test_fetch_failure_drops_a_stale_pending_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Otherwise the untrusted message would show an old fingerprint for a
+    # certificate nobody fetched this time.
+    async def failing_fetch(host: str, port: int, *, handshake_timeout: float = 10.0) -> CertInfo:
+        raise OSError("refused")
+
+    monkeypatch.setattr(trust, "fetch_server_cert", failing_fetch)
+    store = TrustStore(_known(tmp_path), trust_on_first_use=False)
+    store.pending[INFO.host_port] = INFO
+    assert await store.on_untrusted(ADDRESS) is False
+    assert store.pending == {}
+
+
+def test_accept_keeps_a_newer_pending_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # accept() runs on the UI thread, on_untrusted on the client's loop: if a
+    # newer cert replaces the entry while pinning, the newer one stays pending.
+    store = TrustStore(_known(tmp_path), trust_on_first_use=False)
+    store.pending[INFO.host_port] = INFO
+    newer = CertInfo(host_port=INFO.host_port, sha256="ef" * 32, pem="PEM-C")
+    real_pin = store.known.pin
+
+    def pin_then_race(info: CertInfo, *, trusted_by: str) -> object:
+        result = real_pin(info, trusted_by=trusted_by)
+        store.pending[INFO.host_port] = newer
+        return result
+
+    monkeypatch.setattr(store.known, "pin", pin_then_race)
+    assert store.accept(INFO.host_port).sha256 == INFO.sha256
+    assert store.pending == {INFO.host_port: newer}

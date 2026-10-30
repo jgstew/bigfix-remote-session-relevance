@@ -132,6 +132,9 @@ def format_error(r: SessionRelevanceResult, *, escape: bool = False) -> str:
     (it is one error, on stderr) but loses every other control character.
     """
     kind, message = (r.error.kind, r.error.message) if r.error else ("unknown", "")
+    if r.error is not None and (kind, r.error.code) == ("tls", "untrusted") and r.connection:
+        # The library's message is front-end neutral; here, say how.
+        message = f"{message} (trust it with --trust-cert {r.connection})"
     if escape:
         message = escape_controls(message, keep_newlines=True)
     return f"{r.connection}: {_kind_label(kind)} error: {message}"

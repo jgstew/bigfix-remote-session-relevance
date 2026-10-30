@@ -490,7 +490,11 @@ bundle path.
    `trust_on_first_use=False`, which fetches it with a bare handshake
    unless `record_refused=False`) is kept in `TrustStore.pending` by
    host:port; `TrustStore.accept(host_port)` pins it (`trusted_by="prompt"`,
-   `KeyError` if not pending). A pin mismatch is never recorded: it is not a
+   `KeyError` if not pending, `ValueError` if the host was pinned to a
+   different cert meanwhile, so a stale record never replaces a pin). An
+   entry is dropped once the host is pinned or a later fetch fails, so the
+   message never shows a stale fingerprint. The sync client builds its
+   default store on the caller's thread so the warning names the caller. A pin mismatch is never recorded: it is not a
    first use. The `tls` / `untrusted` message is front-end neutral: it names
    the host:port and, when pending holds it, the SHA-256 fingerprint;
    `detail` carries the TLS error and the CLI's `--trust-cert` hint.

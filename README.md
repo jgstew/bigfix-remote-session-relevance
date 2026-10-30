@@ -242,7 +242,10 @@ for host_port, cert in store.pending.items():  # each came back as tls/untrusted
 A refused certificate comes back as `tls` / `untrusted`, whose message
 names the host:port and, when the store recorded the certificate, its SHA-256
 fingerprint; `detail` keeps the TLS error and the CLI hint (`--trust-cert`).
-The structured certificate is in `store.pending`. A callback that declines
+The structured certificate is in `store.pending`. `accept()` raises
+`ValueError`, and pins nothing, if the host has meanwhile been pinned to a
+different certificate: replacing a pin stays a deliberate step
+(`--forget-cert` / `KnownCerts.forget`). A callback that declines
 records the certificate in `pending` too. `record_refused=False` turns
 recording off, and with `trust_on_first_use=False` also skips the bare
 handshake that fetches the certificate.
@@ -250,12 +253,18 @@ handshake that fetches the certificate.
 **Auto-accept is opt-in from 1.4.0.** `TrustStore()` with no callback, and
 so `AsyncSessionRelevanceClient()` and `evaluate_session_relevance()` with
 the default `trust`, still pin any first-use certificate, but now emit a
-one-time `DeprecationWarning` asking for one of the choices above. **In 2.0
+one-time `DeprecationWarning` asking for one of the choices above. It is
+attributed to your line of code, so Python shows it by default in scripts
+run directly and under pytest; elsewhere enable it with `-W default` or
+`PYTHONWARNINGS=default`. **In 2.0
 the default will refuse and record** (defer). `trust_on_first_use="auto"`
 keeps today's behaviour without the warning; `True` / `False` keep working.
 
 The CLI asks when interactive, pins automatically (`"auto"`) when not, and
-refuses with `--no-tofu`; its behaviour is unchanged. `--show-certs`,
+refuses with `--no-tofu`, as before, and never shows the warning. A refused
+certificate's message now names its fingerprint (still followed by the
+`--trust-cert` hint), and `--no-tofu` fetches the certificate with a bare
+handshake to do so. `--show-certs`,
 `--trust-cert NAME|HOST:PORT` and `--forget-cert HOST:PORT` manage pins in
 `~/.bigfix/.remote_session_known_certs.toml`.
 
