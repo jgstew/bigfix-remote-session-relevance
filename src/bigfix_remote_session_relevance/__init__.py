@@ -41,8 +41,10 @@ from .exceptions import (
     TLSError,
     UnsupportedFeatureError,
 )
+from .paths import data_dir
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .saas_account import SaasAccount, saas_sign_in
 from .server_address import ServerAddress
 from .setup_wizard import run_setup
 from .sync import (
@@ -51,6 +53,24 @@ from .sync import (
     evaluate_session_relevance,
 )
 from .trust import CertInfo, KnownCerts, TrustStore
+
+# Read on first access, not at import: importlib.metadata is otherwise never
+# loaded, and loading it (plus the distribution lookup) is a few ms.
+__version__: str
+
+
+def __getattr__(name: str) -> str:
+    if name != "__version__":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib.metadata
+
+    try:
+        found = importlib.metadata.version("bigfix-remote-session-relevance")
+    except importlib.metadata.PackageNotFoundError:  # a source tree, not installed
+        found = "0+unknown"
+    globals()["__version__"] = found
+    return found
+
 
 __all__ = [
     "ERROR_KINDS",
@@ -74,6 +94,7 @@ __all__ = [
     "ResponseFormatError",
     "RestBackend",
     "ResultError",
+    "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
     "ServerAddress",
@@ -87,15 +108,18 @@ __all__ = [
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",
+    "__version__",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
+    "data_dir",
     "default_config_path",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
     "run_setup",
+    "saas_sign_in",
     "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",

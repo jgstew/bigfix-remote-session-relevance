@@ -29,7 +29,7 @@ import httpx
 from .backends.base import Backend, TrustPolicy
 from .backends.registry import BACKEND_CLASSES
 from .backends.rest import RestBackend
-from .backends.saas import SaasBackend
+from .backends.saas import SaasSessionPool
 from .config import ConnectionConfig, load_config, resolve_config_path, save_connection
 from .deployment import (
     DEPLOYMENT_ID_SESSION_RELEVANCE,
@@ -40,6 +40,7 @@ from .escapes import escape_controls
 from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
 from .result import ResultError
+from .saas_account import new_saas_backend, saas_connection_name, saas_sign_in
 from .server_address import (
     DEFAULT_PORTS,
     ServerAddress,
@@ -212,27 +213,25 @@ async def probe_saas(
 ) -> list[ProbeResult]:
     """Sign in to BigFix SaaS once and probe every server the account lists.
 
-    One backend, so one login: a rejected login is never sent again, and
-    every server is asked over the same session. An account with one server
-    needs no ``sid`` (the gateway's default is that server).
+    The sign-in is `saas_sign_in`'s, shared through a pool, so one login: a
+    rejected login is never sent again, and every server is asked over the
+    same session. An account with one server needs no ``sid`` (the
+    gateway's default is that server).
     """
-    backend = SaasBackend(
-        host,
-        username=email,
-        password=password,
-        totp_prompt=totp_prompt,
-        verify=True,  # a public CA-signed service: no trust on first use
-        connect_timeout=4,
-        read_timeout=30,
-        retries=0,
-        transport=transport,
+    pool = SaasSessionPool()
+    account = await saas_sign_in(
+        host, email, password, prompt=totp_prompt, pool=pool, transport=transport
     )
+    if account.error is not None:
+        return [ProbeResult("saas", host, _status(account.error), None, account.error.message)]
+    # The prompt too, in case the session must be renewed mid-probe.
+    backend = new_saas_backend(host, email, password, totp_prompt=totp_prompt, transport=transport)
+    pool.attach(backend)
     async with backend:
-        first = await _probe_one(backend, host)
-        if len(backend.servers) <= 1:
-            return [first]
+        if len(account.servers) <= 1:
+            return [await _probe_one(backend, host)]
         results = []
-        for sid in backend.servers:
+        for sid in account.servers:
             backend.sid = sid
             results.append(replace(await _probe_one(backend, host), sid=sid))
         return results
@@ -247,15 +246,18 @@ async def _probe_one(backend: Backend, server: str) -> ProbeResult:
     if error is None or error.kind == "session_relevance":
         found = await discover_deployment_id(backend)
         return ProbeResult(backend.name, server, "ok", found, "")
-    status = {
+    return ProbeResult(backend.name, server, _status(error), None, error.message)
+
+
+def _status(error: ResultError) -> str:
+    if error.code == "service_unavailable":
+        return "unavailable"
+    return {
         "authentication": "auth",
         "connection": "unreachable",
         "timeout": "unreachable",
         "tls": "tls",
     }.get(error.kind, "error")
-    if error.code == "service_unavailable":
-        status = "unavailable"
-    return ProbeResult(backend.name, server, status, None, error.message)
 
 
 def run_setup(
@@ -447,8 +449,7 @@ def _where(r: ProbeResult) -> str:
 def _default_name(host: str, r: ProbeResult) -> str:
     if r.backend != "saas":
         return f"{_short(r.server if r.listed else host)}-{r.backend}"
-    region = "-eu" if saas_api_address(normalize_server(host, "saas")).host.startswith("eu") else ""
-    return f"bigfix-saas{region}-{r.sid}" if r.sid else f"bigfix-saas{region}"
+    return saas_connection_name(host, r.sid)
 
 
 def _short(host: str) -> str:

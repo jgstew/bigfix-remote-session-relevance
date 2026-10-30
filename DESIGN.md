@@ -171,7 +171,7 @@ the bigfix-saas MCP server, which makes the same choices).
 - **Setup:** `--setup` treats an https `login.` / `eulogin.` / `api.` /
   `euapi.` host under `bigfix.com` as SaaS (other allowlisted hosts are
   configured by hand) and asks for an email instead of a username. It signs in
-  **once**, through one `SaasBackend` (so a rejected login is never resent),
+  **once**, through `saas_sign_in` (so a rejected login is never resent),
   prompting for a TOTP code only when the service answers `totp_required`, and
   evaluates `sha256 of gather url of bes license` to record `deployment_id`. A
   rejected sign-in is reported and nothing is saved (saving it would resend
@@ -205,6 +205,26 @@ the bigfix-saas MCP server, which makes the same choices).
   a caller building its own backends (bigfix-remote-client-relevance's Fast
   Query, one `SaasBackend` per target) gets the same one-login-per-account
   behaviour without importing from `backends.*`.
+- **Sign-in for a front end (1.6.0, provisional):** `saas_sign_in(host, email,
+  password, *, totp=None, prompt=None, pool=None)` is the wizard's sign-in
+  without the wizard: it signs in (`SaasBackend.sign_in()`, no query) and
+  returns a `SaasAccount` with the account's `servers` (sid values) or the
+  `error`, never raised. It sends at most one login, two when the service
+  answers `totp_required` and a code is given (`totp`) or asked for
+  (`prompt`); the code goes only in answer to that challenge, as in the
+  wizard, rather than in the first POST. Without either, the error is
+  `authentication` / `totp_required`, so a front end asks for the code and
+  calls again, with the same pool too: `SaasBackend.sign_in()` on a backend
+  that has a TOTP prompt drops a cached `totp_required` (the password was
+  accepted, so that login answers the challenge rather than resending a
+  rejection), while a rejected code (`mfa_mismatch`) stays cached like any
+  rejection. A blank email or password is refused without sending (it
+  would still count as a failed login). With a `pool`, backends attached to
+  it later reuse the session, and a rejected sign-in cached in it is not sent
+  again. `SaasAccount.connections()` builds one `ConnectionConfig` per server
+  with the wizard's names and `verify = true`, and no password: the caller
+  stores that. `probe_saas` (the wizard) signs in through it and probes over
+  the same pool, so both share one sign-in path.
 
 ### BigFix Explorer
 
@@ -494,7 +514,7 @@ bundle path.
 2. Otherwise the leaf cert is fetched with a bare handshake (no request, no
    credentials), shown to the trust callback (the CLI prompts with the SHA-256
    fingerprint; prompts are serialized), and pinned in
-   `~/.bigfix/.remote_session_known_certs.toml` (0600, filelock, atomic
+   `.remote_session_known_certs.toml` in the data directory (0600, filelock, atomic
    writes). `trust_on_first_use="auto"` pins without asking and logs a
    WARNING (classic TOFU); `--no-tofu` / `trust_on_first_use=False` refuses.
    With `True` (the default) and no callback, 1.x still auto-pins, with a
@@ -532,7 +552,19 @@ works inside a running event loop.
 
 ## Configuration
 
-`--config`, then `$BFRSR_CONFIG`, then `~/.bigfix/.remote_session_connections.toml`.
+`--config`, then `$BFRSR_CONFIG`, then `.remote_session_connections.toml` in
+the data directory.
+
+The data directory (`paths.data_dir()`) is `$BFRSR_HOME` (blank counts as
+unset, `~` expanded), else `~/.bigfix`, read on every call so an app can set
+it after importing. Every default path is built on it: the connections file,
+the pinned certificates, the local root server's deployment-id cache, and
+any file a later version adds (a persistent SaaS session store, say, or a
+keyring fallback), so one variable keeps covering them all. A specific
+override still wins: `--config` / `$BFRSR_CONFIG` for the connections file,
+a `KnownCerts(path)` for pins. Out of scope: `~/.besapi.conf`, besapi's own
+file, read from the real home.
+
 Read and written with tomlkit. Lenient aliases (`url`/`host`, `type`, `user`,
 `api_key`…) because people write these by hand; unknown keys are warned about,
 not fatal. Validation rejects: duplicate names, unknown backends, bad servers,
@@ -594,7 +626,7 @@ read-only, so these are used without opting in, as besapi does.
   `password` or token: `RESTURL` decides where the credentials go. The
   automatic connection is never written to the file; its discovered
   deployment id is kept, with its server, in
-  `~/.bigfix/.remote_session_local_root_server.toml` (0600) and reused only
+  `.remote_session_local_root_server.toml` in the data directory (0600) and reused only
   for that server.
 
 ## Compatibility

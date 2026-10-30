@@ -1,4 +1,4 @@
-"""Connection configuration: ``~/.bigfix/.remote_session_connections.toml``.
+"""Connection configuration: ``.remote_session_connections.toml`` in `data_dir`.
 
 Read and written with tomlkit so a user's comments and layout survive the
 setup wizard and deployment-id write-back. Secrets are never put in a repr,
@@ -29,6 +29,7 @@ from . import local_root_server
 from .deployment import is_deployment_id
 from .exceptions import ConfigError
 from .local_root_server import LOCAL_ROOT_SERVER
+from .paths import data_dir
 from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
 
 log = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ _KEY_ALIASES = {
 
 
 def default_config_path() -> Path:
-    return Path.home() / ".bigfix" / ".remote_session_connections.toml"
+    return data_dir() / ".remote_session_connections.toml"
 
 
 def resolve_config_path(explicit: str | os.PathLike[str] | None = None) -> Path:
@@ -343,7 +344,7 @@ def _local_server() -> str:
 
 
 def local_deployment_cache_path() -> Path:
-    return Path.home() / ".bigfix" / ".remote_session_local_root_server.toml"
+    return data_dir() / ".remote_session_local_root_server.toml"
 
 
 def _cached_local_deployment_id(server: str) -> str | None:

@@ -138,6 +138,7 @@ PUBLIC_NAMES = [
     "ResponseFormatError",
     "RestBackend",
     "ResultError",
+    "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
     "ServerAddress",
@@ -151,15 +152,18 @@ PUBLIC_NAMES = [
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",
+    "__version__",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
+    "data_dir",
     "default_config_path",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
     "run_setup",
+    "saas_sign_in",
     "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",
@@ -193,6 +197,9 @@ PROVISIONAL = {
     "SaasSessionPool",
     "backend_from_config",
     "client_query_max_targets",
+    # 1.6.0: for a front end's "Add BigFix SaaS account" screen (issue #34).
+    "SaasAccount",
+    "saas_sign_in",
 }
 
 

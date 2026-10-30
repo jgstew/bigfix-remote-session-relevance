@@ -49,6 +49,15 @@ backend over https, plus Web Reports over http. One entered as `https://`
 is probed only over https (Web Reports still on 443 and 8083), and
 `http://` probes only Web Reports.
 
+Every file the library reads or writes (the connections, pinned
+certificates, and the local root server's cached deployment id) lives in
+`~/.bigfix`, or in `$BFRSR_HOME` when that is set. A sandboxed app (iOS,
+Android) sets it once at startup to its own data directory, e.g.
+`os.environ["BFRSR_HOME"] = str(app_support_dir)`; `data_dir()` returns the
+directory in use. `$BFRSR_CONFIG` (or `--config`) still picks the connections
+file itself, and a `KnownCerts(path)` its own pin file. `~/.besapi.conf`,
+which belongs to besapi, is always read from the real home directory.
+
 When the REST API answers, setup also asks the root server for the Explorer
 and Web Reports servers registered with it (`/api/explorers`,
 `/api/webreports`), so ones on other machines can be found. It shows the
@@ -266,7 +275,7 @@ certificate's message now names its fingerprint (still followed by the
 `--trust-cert` hint), and `--no-tofu` fetches the certificate with a bare
 handshake to do so. `--show-certs`,
 `--trust-cert NAME|HOST:PORT` and `--forget-cert HOST:PORT` manage pins in
-`~/.bigfix/.remote_session_known_certs.toml`.
+`.remote_session_known_certs.toml` in `~/.bigfix` (or `$BFRSR_HOME`).
 
 ### BigFix Query (ClientQuery, provisional)
 
@@ -341,6 +350,29 @@ wizard as a function returning its exit code. `path=None` is the usual
 config path; `backends=("rest",)` probes, and offers to save, only those
 backends.
 
+For an "Add BigFix SaaS account" screen, `await saas_sign_in(host, email,
+password)` signs in without a prompt and returns a `SaasAccount`: its
+`servers` (the `sid` values), or its `error` (never raised). It sends one
+login, or two when the account needs MFA and you pass `totp="123456"` (or a
+`prompt` callable); without a code an MFA account comes back as
+`error.code == "totp_required"`, so ask for the code and call again. A
+rejected sign-in is returned, never retried: failed logins count toward a
+permanent account lock.
+
+```python
+import dataclasses
+from bigfix_remote_session_relevance import saas_sign_in
+
+account = await saas_sign_in("login.bigfix.com", email, password)
+if account.ok:
+    connections = [
+        dataclasses.replace(c, password=password)  # or password_env=...
+        for c in account.connections()  # one per server, named like --setup
+    ]
+```
+
+`bigfix_remote_session_relevance.__version__` is the installed version.
+
 > **Upgrading from 0.4 or earlier:** 0.5.0 renamed, with no alias,
 > `result.relevance` → `result.session_relevance` (and the `--json` key),
 > the `relevance=` / `relevances=` parameters → `session_relevance=` /
@@ -365,7 +397,8 @@ Removing or changing any of these needs a new major version:
 - **Config file:** `schema_version = 1` and the keys and backend names in
   [remote_session_connections.example.toml](remote_session_connections.example.toml),
   where the file is looked for (`--config`, `$BFRSR_CONFIG`,
-  `~/.bigfix/.remote_session_connections.toml`) and `BFRSR_LOCAL_ROOT_SERVER`.
+  `.remote_session_connections.toml` in `$BFRSR_HOME` or `~/.bigfix`) and
+  `BFRSR_LOCAL_ROOT_SERVER`.
   The lenient aliases (`url`, `host`, `user`, `type`, `wr`, …) keep working,
   but may be deprecated, with a warning for at least one minor release first.
 
@@ -373,10 +406,11 @@ Removing or changing any of these needs a new major version:
 `WebReportsBackend`, `SaasBackend`, `TrustStore`, `KnownCerts` and
 `CertInfo`, (since 1.1.0) the BigFix Query names `ClientQueryExtras`,
 `ClientQueryResponse`, `ClientQueryRow`, `supports_client_query` and
-`run_setup`, (since 1.4.0) `TrustPolicy` and `ServerAddress`, and (since
+`run_setup`, (since 1.4.0) `TrustPolicy` and `ServerAddress`, (since
 1.5.0) `SaasSessionPool`, `backend_from_config` and
-`client_query_max_targets`, are public and usable, but may change in a minor release (noted
-in its release notes). Use the clients for a stable interface.
+`client_query_max_targets`, and (since 1.6.0) `saas_sign_in` and
+`SaasAccount`, are public and usable, but may change in a minor release
+(noted in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag
 or config key) come in minor releases. Code that switches on error kinds
@@ -387,7 +421,7 @@ config keys they don't know.
 
 Not covered: the plain-text CLI layout and summary, stderr and log messages,
 error message wording, `detail` and `raw` (the server's own text), the
-certificate pin and cache files under `~/.bigfix`, and anything not in
+certificate pin and cache files' formats, and anything not in
 `__all__` (types such as `Pin` or `ServerAddress` that provisional classes
 return or take are provisional with them).
 

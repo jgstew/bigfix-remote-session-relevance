@@ -20,7 +20,13 @@ from typing import Any
 
 import pytest
 
-_REAL_DEFAULT_CONFIG = Path.home() / ".bigfix" / ".remote_session_connections.toml"
+# The library's own lookup ($BFRSR_CONFIG, else $BFRSR_HOME or ~/.bigfix),
+# before the fixture below redirects HOME and clears both.
+_REAL_DEFAULT_CONFIG = Path(
+    os.environ.get("BFRSR_CONFIG")
+    or Path(os.environ.get("BFRSR_HOME", "").strip() or Path.home() / ".bigfix")
+    / ".remote_session_connections.toml"
+).expanduser()
 LIVE_CONFIG_PATH = Path(os.environ.get("BFRSR_LIVE_CONFIG", _REAL_DEFAULT_CONFIG)).expanduser()
 LIVE_ENABLED = (
     bool(os.environ.get("BFRSR_LIVE_CONFIG")) or os.environ.get("BFRSR_LIVE_TESTS") == "1"
@@ -75,6 +81,7 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USERPROFILE", str(home))
     for var in (
         "BFRSR_CONFIG",
+        "BFRSR_HOME",
         "BFRSR_LOCAL_ROOT_SERVER",
         "BES_ROOT_SERVER",
         "BES_USER_NAME",
