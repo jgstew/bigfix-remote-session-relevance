@@ -130,7 +130,8 @@ async def test_no_failover_on_relevance_error() -> None:
     assert router.calls == ["a-ex"]
 
 
-async def test_no_failover_on_pin_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("code", ["pin_mismatch", "pinned_cert_invalid"])
+async def test_no_failover_on_pin_errors(monkeypatch: pytest.MonkeyPatch, code: str) -> None:
     from bigfix_remote_session_relevance.backends import base
     from bigfix_remote_session_relevance.result import ResultError, SessionRelevanceResult
 
@@ -142,7 +143,7 @@ async def test_no_failover_on_pin_mismatch(monkeypatch: pytest.MonkeyPatch) -> N
     async def fake(self: Any, session_relevance: str, op: Any) -> SessionRelevanceResult:
         if self.connection == "a-ex":
             return SessionRelevanceResult.failure(
-                session_relevance, ResultError(kind="tls", code="pin_mismatch", message="changed")
+                session_relevance, ResultError(kind="tls", code=code, message="changed")
             )
         return await original(self, session_relevance, op)
 
@@ -150,7 +151,7 @@ async def test_no_failover_on_pin_mismatch(monkeypatch: pytest.MonkeyPatch) -> N
     async with _client(conns, router) as client:
         (result,) = await client.evaluate("q")
     assert result.error is not None
-    assert result.error.code == "pin_mismatch"
+    assert result.error.code == code
     assert router.calls == []
 
 

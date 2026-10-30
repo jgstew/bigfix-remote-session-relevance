@@ -6,8 +6,12 @@ deployment-CA certificates. In ``verify = "tofu"`` mode (the default):
 1. Normal CA validation is tried first; a CA-valid cert is never pinned.
 2. Otherwise the cert is fetched with a bare handshake (no credentials
    sent), shown to the trust callback (the CLI prompts), and pinned to
-   ``~/.bigfix/.remote_session_known_certs.toml``. With no callback it is
-   pinned automatically and logged, which is classic TOFU.
+   ``~/.bigfix/.remote_session_known_certs.toml``. A refused cert is kept
+   in `TrustStore.pending`, so a front end can ask after the run and
+   `TrustStore.accept` it (deferred trust). ``trust_on_first_use="auto"``
+   pins without asking and logs, which is classic TOFU; 1.x also does that
+   when no callback is given, with a one-time DeprecationWarning, and 2.0
+   will refuse and record instead.
 3. Afterwards the pinned cert is the *only* trust anchor for that
    ``host:port``, so OpenSSL rejects anything else during the handshake,
    before an Authorization header or SOAP password is sent.
@@ -25,12 +29,14 @@ import inspect
 import logging
 import os
 import ssl
+import sys
 import tempfile
+import warnings
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomlkit
 from filelock import FileLock
@@ -42,6 +48,10 @@ from .server_address import ServerAddress
 log = logging.getLogger(__name__)
 
 TrustCallback = Callable[["CertInfo"], bool | Awaitable[bool]]
+TrustOnFirstUse = bool | Literal["auto"]
+
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__)) + os.sep
+_implicit_auto_warned = False
 
 
 def default_known_certs_path() -> Path:
@@ -190,21 +200,49 @@ def _pin(host_port: str, data: Mapping[str, Any]) -> Pin:
 
 
 class TrustStore:
-    """Implements the backends' `TrustPolicy` on top of `KnownCerts`."""
+    """Implements the backends' `TrustPolicy` on top of `KnownCerts`.
+
+    ``trust_on_first_use`` decides a certificate no CA vouches for:
+
+    * ``"auto"``: pin it without asking (classic TOFU, logged).
+    * ``True``: ask ``callback``. With no callback 1.x pins it as ``"auto"``
+      does, with a one-time DeprecationWarning; 2.0 will refuse and record.
+    * ``False``: refuse it (deferred trust).
+
+    A refused cert is recorded in `pending` (unless ``record_refused`` is
+    False), so a front end can show its fingerprint after the run and pin it
+    with `accept`. A pinned host that presents a different cert is never
+    recorded: that is a security signal, not a first use.
+    """
 
     def __init__(
         self,
         known: KnownCerts | None = None,
         *,
         callback: TrustCallback | None = None,
-        trust_on_first_use: bool = True,
+        trust_on_first_use: TrustOnFirstUse = True,
+        record_refused: bool = True,
     ) -> None:
+        # `in` alone would let 1 and 0 through (1 == True).
+        if not (isinstance(trust_on_first_use, bool) or trust_on_first_use == "auto"):
+            raise ValueError(
+                f'trust_on_first_use must be True, False or "auto", not {trust_on_first_use!r}'
+            )
+        if trust_on_first_use == "auto" and callback is not None:
+            raise ValueError('trust_on_first_use="auto" never asks; pass a callback or "auto"')
         self.known = known or KnownCerts()
         self.callback = callback
-        self.trust_on_first_use = trust_on_first_use
+        self.trust_on_first_use: TrustOnFirstUse = trust_on_first_use
+        self.record_refused = record_refused
+        self.pending: dict[str, CertInfo] = {}
+        """First-use certificates refused this session, by host:port: the
+        callback said no, or trust_on_first_use is False. A front end shows
+        these and calls `accept`."""
         self._locks: dict[str, asyncio.Lock] = {}
         # One prompt at a time across hosts, or interactive questions interleave.
         self._prompt_lock: asyncio.Lock | None = None
+        if trust_on_first_use is True and callback is None:
+            _warn_implicit_auto()
 
     def is_pinned(self, address: ServerAddress) -> bool:
         return self.known.get(address.host_port) is not None
@@ -214,26 +252,31 @@ class TrustStore:
         return pinned_context(pin.pem) if pin else ca_context()
 
     async def on_untrusted(self, address: ServerAddress) -> bool:
-        """First use: fetch, ask (or auto-accept), pin. True when now pinned."""
+        """First use: fetch, ask (or auto-accept), pin. True when now pinned.
+
+        A refusal records the certificate in `pending`, to `accept` later.
+        """
         lock = self._locks.setdefault(address.host_port, asyncio.Lock())
         async with lock:
             if self.is_pinned(address):
                 return True  # another connection pinned it while we waited
-            if not self.trust_on_first_use:
+            if self.trust_on_first_use is False and not self.record_refused:
                 return False
             try:
                 info = await fetch_server_cert(address.host, address.port)
             except (OSError, ssl.SSLError, TimeoutError) as exc:
                 log.warning("cannot fetch certificate from %s: %s", address.host_port, exc)
                 return False
-            if self.callback is None:
+            if self.trust_on_first_use is False:
+                accepted = False
+            elif self.callback is None:  # "auto", or True with no callback (1.x)
                 log.warning(
                     "trusting certificate for %s on first use (sha256 %s); pinned in %s",
                     info.host_port,
                     info.sha256,
                     self.known.path,
                 )
-                trusted_by = "auto"
+                self.known.pin(info, trusted_by="auto")
                 accepted = True
             else:
                 if self._prompt_lock is None:
@@ -243,10 +286,25 @@ class TrustStore:
                     accepted = (
                         bool(await decision) if inspect.isawaitable(decision) else bool(decision)
                     )
-                trusted_by = "prompt"
+                if accepted:
+                    self.known.pin(info, trusted_by="prompt")
             if accepted:
-                self.known.pin(info, trusted_by=trusted_by)
+                self.pending.pop(info.host_port, None)
+            elif self.record_refused:
+                self.pending[info.host_port] = info
             return accepted
+
+    def accept(self, host_port: str, *, trusted_by: str = "prompt") -> Pin:
+        """Pin a pending certificate, once the user has confirmed its fingerprint.
+
+        Raises KeyError if ``host_port`` isn't pending. The pin is exactly the
+        certificate that was refused, so if the server presents another one
+        by the next run, that run fails with ``pin_mismatch``.
+        """
+        info = self.pending[host_port]
+        pin = self.known.pin(info, trusted_by=trusted_by)
+        del self.pending[host_port]
+        return pin
 
     async def mismatch_error(self, address: ServerAddress, backend: str) -> ResultError:
         pin = self.known.get(address.host_port)
@@ -276,3 +334,27 @@ class TrustStore:
             ),
             detail=f"pinned={pinned} presented={presented}",
         )
+
+
+def _warn_implicit_auto() -> None:
+    """Warn, once per process, that auto-accept came from a missing callback."""
+    global _implicit_auto_warned
+    if _implicit_auto_warned:
+        return
+    _implicit_auto_warned = True
+    # Point at the first caller outside this package (often the code that
+    # built a default client), where Python's default filters show it.
+    # warnings.warn's skip_file_prefixes would do this, but needs 3.12.
+    frame = sys._getframe(0)
+    level = 1
+    while frame.f_back is not None and frame.f_code.co_filename.startswith(_PACKAGE_DIR):
+        frame = frame.f_back
+        level += 1
+    warnings.warn(
+        "TrustStore with no callback auto-accepts (pins) any certificate a server presents on "
+        'first use. Choose explicitly: trust_on_first_use="auto" to keep that, a callback to '
+        "ask, or trust_on_first_use=False to refuse and record it in TrustStore.pending for "
+        "TrustStore.accept(). In 2.0 the default will refuse and record.",
+        DeprecationWarning,
+        stacklevel=level,
+    )

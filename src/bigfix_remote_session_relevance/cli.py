@@ -174,10 +174,14 @@ def main(
         # Prompts run on the client's loop thread while answers stream out on
         # this one; holding the terminal keeps answers from landing mid-prompt.
         ask_held, secret_held = _holding_terminal(ask), _holding_terminal(secret)
-        trust = TrustStore(
-            callback=(lambda info: _prompt_trust(info, ask_held)) if is_interactive else None,
-            trust_on_first_use=not args.no_tofu,
-        )
+        # Not interactive, the CLI keeps classic TOFU ("auto") explicitly: there
+        # is no one to ask, and --no-tofu is the documented way to refuse.
+        if args.no_tofu:
+            trust = TrustStore(trust_on_first_use=False)
+        elif is_interactive:
+            trust = TrustStore(callback=lambda info: _prompt_trust(info, ask_held))
+        else:
+            trust = TrustStore(trust_on_first_use="auto")
         client_kwargs: dict[str, Any] = {
             "mode": "all" if args.all_connections else "per_deployment",
             "connections": args.connection,

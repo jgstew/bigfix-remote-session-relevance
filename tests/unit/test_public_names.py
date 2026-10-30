@@ -139,12 +139,14 @@ PUBLIC_NAMES = [
     "RestBackend",
     "ResultError",
     "SaasBackend",
+    "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
     "SessionRelevanceEvaluationError",
     "SessionRelevanceResult",
     "SessionRelevanceResults",
     "TLSError",
+    "TrustPolicy",
     "TrustStore",
     "UnsupportedFeatureError",
     "WebReportsBackend",
@@ -181,6 +183,9 @@ PROVISIONAL = {
     "ClientQueryRow",
     "supports_client_query",
     "run_setup",
+    # 1.4.0: so callers can type their own trust policies (issue #30).
+    "ServerAddress",
+    "TrustPolicy",
 }
 
 

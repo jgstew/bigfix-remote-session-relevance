@@ -526,18 +526,34 @@ class Backend(ABC):
                     if attempt == 0 and await self.trust.on_untrusted(self.address):
                         await self.aclose()
                         continue
-                    err = ResultError(
-                        kind="tls",
-                        code="untrusted",
-                        backend=self.name,
-                        message=(
-                            f"certificate for {self.address.host_port} is not trusted "
-                            "and was not pinned (trust it with --trust-cert)"
-                        ),
-                        detail=err.message,
-                    )
+                    err = self._untrusted_error(err)
                 return err
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def _untrusted_error(self, err: ResultError) -> ResultError:
+        """``tls/untrusted``, worded for any front end, not just the CLI.
+
+        The fingerprint comes from the store's record of the refused cert
+        (`TrustStore.pending`); a custom `TrustPolicy` may keep none.
+        """
+        host_port = self.address.host_port
+        pending = getattr(self.trust, "pending", None)
+        info = pending.get(host_port) if isinstance(pending, dict) else None
+        fingerprint = getattr(info, "fingerprint", None)
+        if isinstance(fingerprint, str):
+            message = (
+                f"certificate for {host_port} is not trusted yet (SHA-256 {fingerprint}); "
+                "confirm it to pin it"
+            )
+        else:
+            message = f"certificate for {host_port} is not trusted and was not pinned"
+        return ResultError(
+            kind="tls",
+            code="untrusted",
+            backend=self.name,
+            message=message,
+            detail=f"{err.message} (CLI: --trust-cert {host_port})",
+        )
 
     def _response_problem(self, response: httpx.Response) -> ResultError | None:
         """Auth failures are decided by status alone, before any body parsing."""

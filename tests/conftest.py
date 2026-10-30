@@ -412,3 +412,125 @@ def tls_server(tls_certs: dict[str, Path]):  # type: ignore[no-untyped-def]
     yield _start
     for server in servers:
         server.close()
+
+
+class RawTLSServer:
+    """A TLS server that parses nothing and records every byte it receives.
+
+    ``connections`` holds one entry per accepted TCP connection: whether its
+    TLS handshake completed, and every byte the client sent after it. Unlike
+    `TLSServer` it needs no valid HTTP, so a header, a SOAP body or a stray
+    byte shows up all the same. Once a full request (headers plus
+    Content-Length body) arrives it answers like the REST API's /api/query,
+    so the positive control (a correct pin) can finish its run.
+    """
+
+    _ANSWER = b'{"result":[1],"plural":false,"type":"integer","evaltime_ms":0}'
+
+    def __init__(self, certfile: Path, keyfile: Path) -> None:
+        import socket
+        import ssl
+        import threading
+
+        self.connections: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._ctx.load_cert_chain(certfile, keyfile)
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self._listener.settimeout(0.05)
+        self.port = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._accepting = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accepting.start()
+
+    @property
+    def received(self) -> bytes:
+        """Every byte received after a handshake, across all connections."""
+        with self._lock:
+            return b"".join(bytes(c["data"]) for c in self.connections)
+
+    def _accept_loop(self) -> None:
+        import threading
+
+        while not self._stop.is_set():
+            try:
+                sock, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            thread = threading.Thread(target=self._serve, args=(sock,), daemon=True)
+            self._threads.append(thread)
+            thread.start()
+
+    def _serve(self, sock: Any) -> None:
+        import contextlib
+        import ssl
+
+        record: dict[str, Any] = {"handshake_ok": False, "data": bytearray()}
+        with self._lock:
+            self.connections.append(record)
+        sock.settimeout(5)
+        try:
+            tls = self._ctx.wrap_socket(sock, server_side=True)
+        except (OSError, ssl.SSLError):
+            sock.close()
+            return  # the client refused our certificate mid-handshake
+        record["handshake_ok"] = True
+        answered = False
+        try:
+            while True:
+                chunk = tls.recv(65536)
+                if not chunk:
+                    break
+                with self._lock:
+                    record["data"].extend(chunk)
+                if not answered and self._request_complete(bytes(record["data"])):
+                    answered = True
+                    tls.sendall(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                        b"connection: close\r\ncontent-length: "
+                        + str(len(self._ANSWER)).encode()
+                        + b"\r\n\r\n"
+                        + self._ANSWER
+                    )
+                    break
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            with contextlib.suppress(OSError, ssl.SSLError):
+                tls.close()
+
+    @staticmethod
+    def _request_complete(data: bytes) -> bool:
+        head, sep, body = data.partition(b"\r\n\r\n")
+        if not sep:
+            return False
+        for line in head.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"content-length":
+                return len(body) >= int(value.strip())
+        return True
+
+    def close(self) -> None:
+        self._stop.set()
+        self._listener.close()
+        self._accepting.join(timeout=2)
+        for thread in self._threads:
+            thread.join(timeout=2)
+
+
+@pytest.fixture
+def raw_tls_server(tls_certs: dict[str, Path]):  # type: ignore[no-untyped-def]
+    """Factory: raw_tls_server("self_a") -> a running RawTLSServer with that cert."""
+    servers: list[RawTLSServer] = []
+
+    def _start(name: str) -> RawTLSServer:
+        server = RawTLSServer(tls_certs[f"{name}_pem"], tls_certs[f"{name}_key"])
+        servers.append(server)
+        return server
+
+    yield _start
+    for server in servers:
+        server.close()
