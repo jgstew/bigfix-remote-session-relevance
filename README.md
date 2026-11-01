@@ -113,8 +113,11 @@ run an MFA account unattended.
   shows only `session_cache: on/off`.
 
 Processes using one account at the same time take turns renewing it, under
-a lock file beside the sessions file, so they never spend each other's
-single-use refresh token.
+a lock file beside the sessions file, so they don't spend each other's
+single-use refresh token (one that waits more than 35 s goes ahead, and a
+refused token then reads the saved session again before signing in). A
+renewal that fails for a passing reason (a 5xx, a timeout) keeps the saved
+session for the next try.
 
 ### Passwords in the OS password store
 
@@ -446,8 +449,9 @@ login, or two when the account needs MFA and you pass `totp="123456"` (or a
 `error.code == "totp_required"`, so ask for the code and call again. A
 rejected sign-in is returned, never retried: failed logins count toward a
 permanent account lock.
-It always sends the login, even when a session is saved, so a wrong
-password never looks right, and saves the new session for later runs.
+It sends the login even when a session is saved for later runs, so a
+wrong password never looks right, and saves the new session. (With a
+`pool=` that is already signed in, it reuses that sign-in, as before.)
 
 Saved sessions (see [Saved BigFix SaaS sessions](#saved-bigfix-saas-sessions))
 use the `secrets=` store an app passes to `AsyncSessionRelevanceClient` or

@@ -242,9 +242,11 @@ the bigfix-saas MCP server, which makes the same choices).
   - *Renewal* runs by the wall clock as well as the monotonic one (which may
     stop while a device sleeps), so no request leaves with an expired token;
     the 401 renewal stays only as a backstop. Within 1 h of `refresh_exp` a
-    login comes first, for a new week; when that login answers
-    `totp_required` (MFA, no prompt; not counted toward the lockout) the
-    refresh still runs until the expiry.
+    login comes first, for a new week; when that login fails without counting
+    toward the lockout (`totp_required` for MFA with no prompt,
+    `max_concurrent_sessions_reached`, `activate_mfa_required`,
+    `password_change_required`, or a 5xx) the refresh still runs until the
+    expiry. A rejected password or code stays cached and fails the request.
   - *Coordinated refresh:* under a `filelock` on `<sessions file>.lock`
     (whichever store holds the tokens), taken in a thread with a 35 s
     timeout, the entry is read again. A pair newer than this session's means
@@ -253,8 +255,25 @@ the bigfix-saas MCP server, which makes the same choices).
     written back before the lock is released. A refresh rejected as spent
     reads the store once more (a process that could not get the lock may
     have won), then drops the entry only if it still holds the spent token,
-    then signs in. If the lock times out, the refresh goes ahead with a
-    warning. Every login and refresh writes the pair back under the lock.
+    then signs in. Only a 401 means spent: a 5xx, 429 or network error
+    returns the error and keeps the entry for the next try. If the lock
+    times out, the refresh goes ahead with a warning. Every login and
+    refresh writes the pair back under the lock; a failed save is a warning.
+  - *Newer means stored later*, not merely different: `SaasSession.obtained_at`
+    is when the in-memory pair was issued (or the adopted entry's
+    `stored_at`), and a saved pair wins only with a later `stored_at`. A save
+    that failed, or a pooled backend with `session_cache = false`, otherwise
+    leaves an older pair that would be adopted, refused and dropped.
+  - *Both copies are read:* a save the secret store refused goes to the file
+    (and the store's copy is deleted, best effort); `load` takes the entry
+    with the later `stored_at`.
+  - The lock is polled (`blocking=False`, 50 ms) rather than awaited in a
+    thread, so waiters never tie up the executor that store I/O runs on. The
+    refresh and its save run shielded from cancellation: once sent, the old
+    token is spent, so a Ctrl-C must not lose the new pair.
+  - Cookies are rebuilt after each login and refresh, one per name, on the
+    API host with path `/`, the response's values winning, so an adopted
+    cookie and a service-set one never both go out.
   - *Never:* a TOTP code is cached or replayed (single-use, and a wrong one
     counts toward the lockout); a logout is sent (it would end the session
     other processes use); a token reaches `repr`, logs, results or

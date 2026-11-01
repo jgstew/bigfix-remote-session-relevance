@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import dataclasses
 import json
 import logging
 import os
@@ -72,6 +73,11 @@ class FakeSaas:
         self.issued_access: set[str] = set()
         self.expired_access_sent = 0
         self.on_refresh: Any = None  # hook(token) before a refresh is answered
+        self.refresh_status: int | None = None  # answer refreshes with this, spending nothing
+        self.login_status: int | None = None  # answer logins with this
+        self.login_signal = "unavailable"
+        self.cookie_domain = ""  # e.g. "; Domain=api.bigfix.com"
+        self.most_refresh_cookies = 0  # the most refreshToken cookies one request sent
 
     def transport(self) -> httpx.AsyncBaseTransport:
         return httpx.MockTransport(self._handle)
@@ -110,8 +116,8 @@ class FakeSaas:
             200,
             json=body,
             headers=[
-                ("set-cookie", f"accessToken={access}; Path=/; HttpOnly; Secure"),
-                ("set-cookie", f"refreshToken={refresh}; Path=/; HttpOnly; Secure"),
+                ("set-cookie", f"accessToken={access}; Path=/{self.cookie_domain}; HttpOnly"),
+                ("set-cookie", f"refreshToken={refresh}; Path=/{self.cookie_domain}; HttpOnly"),
             ],
         )
 
@@ -120,9 +126,15 @@ class FakeSaas:
         self.paths[path] += 1
         await asyncio.sleep(0.01)  # let concurrent callers overlap
         cookies = _cookies(request)
+        sent = request.headers.get("cookie", "").count("refreshToken=")
+        self.most_refresh_cookies = max(self.most_refresh_cookies, sent)
         if path == "/auth/v1/user/login":
             data = json.loads(request.content)["data"]
             self.login_bodies.append(data)
+            if self.login_status is not None:
+                return httpx.Response(
+                    self.login_status, json={"data": {"errorMessage": self.login_signal}}
+                )
             if data.get("password") != "pw":
                 return _fail("Incorrect username or password.")
             if self.mfa and "totp" not in data:
@@ -132,6 +144,8 @@ class FakeSaas:
             token = cookies.get("refreshToken", "")
             if self.on_refresh is not None:
                 self.on_refresh(token)
+            if self.refresh_status is not None:
+                return httpx.Response(self.refresh_status, text="unavailable")
             rexp = self.live_refresh.pop(token, None)  # single-use
             if rexp is None or rexp <= time.time():
                 return _fail("invalid refresh token")
@@ -671,3 +685,204 @@ def test_module_exports() -> None:
         "default_saas_session_store",
         "default_saas_sessions_path",
     }
+
+
+# -- review fixes: keep the session through transient and odd failures --------------
+
+
+@pytest.mark.parametrize("status", [429, 502, 503])
+async def test_a_transient_refresh_error_keeps_the_saved_session(status: int) -> None:
+    # Only a 401 means the token is spent; dropping the entry on a 5xx would
+    # cost an unattended MFA account its week.
+    fake = FakeSaas(mfa=True)
+    store = SaasSessionStore()
+    old = _saved(fake, access_in=-60)
+    store.save(API, EMAIL, old)
+    fake.refresh_status = status
+    result = await _query(_backend(fake))
+    assert result.error is not None
+    assert result.error.http_status == status
+    assert fake.paths["/auth/v1/user/login"] == 0
+    kept = store.load(API, EMAIL)
+    assert kept is not None and kept.refresh_token == old.refresh_token
+    fake.refresh_status = None  # the next run recovers with the same token
+    assert (await _query(_backend(fake))).ok
+    assert fake.paths["/auth/v1/user/login"] == 0
+
+
+async def test_a_failed_save_does_not_make_the_stale_pair_win(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The store keeps an older pair when saving the new one failed; the
+    # session's own, newer pair must be the one refreshed next time.
+    fake = FakeSaas(mfa=True)
+    store = SaasSessionStore()
+    store.save(API, EMAIL, _saved(fake, access_in=-60))
+    real_save = SaasSessionStore.save
+
+    def refuse(self: SaasSessionStore, *args: Any) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(SaasSessionStore, "save", refuse)
+    backend = _backend(fake)
+    async with backend:
+        with caplog.at_level(logging.WARNING):
+            assert (await backend.evaluate("1")).ok  # refresh 1, not saved
+        assert "could not save" in caplog.text
+        monkeypatch.setattr(SaasSessionStore, "save", real_save)
+        real = time.time
+        monkeypatch.setattr(time, "time", lambda: real() + 3600)
+        result = await backend.evaluate("1")  # refresh 2, with the live token
+    assert result.ok, result.error
+    assert fake.paths["/auth/v1/token/refresh"] == 2
+    assert fake.paths["/auth/v1/user/login"] == 0
+
+
+async def test_a_pooled_backend_without_a_store_does_not_make_the_store_win() -> None:
+    fake = FakeSaas(mfa=True)
+    SaasSessionStore().save(API, EMAIL, _saved(fake, access_in=60))
+    pool = SaasSessionPool()
+    stored = _backend(fake)
+    plain = SaasBackend(
+        "login.bigfix.com",
+        username=EMAIL,
+        password="pw",
+        transport=fake.transport(),
+        session_store=None,
+    )
+    pool.attach(stored)
+    pool.attach(plain)
+    assert (await stored.evaluate("1")).ok  # adopted
+    stored._session.expires_at = time.time() - 1  # due for renewal
+    assert (await plain.evaluate("1")).ok  # refreshes, saves nothing
+    stored._session.expires_at = time.time() - 1
+    assert (await stored.evaluate("1")).ok  # must refresh the live pair
+    for b in (stored, plain):
+        await b.aclose()
+    assert fake.paths["/auth/v1/token/refresh"] == 2
+    assert fake.paths["/auth/v1/user/login"] == 0
+
+
+def test_a_newer_file_entry_beats_a_stale_secret_store_entry(tmp_path: Path) -> None:
+    secrets = BrokenSecrets(get=False, set=False)
+    store = SaasSessionStore(tmp_path / "s.toml", secrets=secrets)
+    old = _saved(FakeSaas())
+    store.save(API, EMAIL, old)  # in the secret store
+    secrets.fail_set = True
+    newer = dataclasses.replace(_saved(FakeSaas()), stored_at=old.stored_at + 10)
+    store.save(API, EMAIL, newer)  # refused there: the file
+    assert store.load(API, EMAIL) == newer
+    # And a stale failure for the old token leaves the newer entry alone.
+    assert not store.forget(API, EMAIL, refresh_token=old.refresh_token)
+    assert store.load(API, EMAIL) == newer
+
+
+@pytest.mark.parametrize(
+    ("status", "signal"),
+    [(503, "unavailable"), (401, "max_concurrent_sessions_reached")],
+)
+async def test_a_failed_renewal_login_still_refreshes(status: int, signal: str) -> None:
+    # The refresh token still works until its expiry and sends no password.
+    fake = FakeSaas()
+    SaasSessionStore().save(API, EMAIL, _saved(fake, access_in=-60, refresh_in=1800))
+    fake.login_status, fake.login_signal = status, signal
+    result = await _query(_backend(fake))
+    assert result.ok, result.error
+    assert fake.paths["/auth/v1/user/login"] == 1
+    assert fake.paths["/auth/v1/token/refresh"] == 1
+
+
+async def test_a_rejected_password_at_renewal_is_not_papered_over() -> None:
+    fake = FakeSaas()
+    SaasSessionStore().save(API, EMAIL, _saved(fake, access_in=-60, refresh_in=1800))
+    backend = SaasBackend(
+        "login.bigfix.com",
+        username=EMAIL,
+        password="changed",
+        transport=fake.transport(),
+        session_store=SaasSessionStore(),
+    )
+    async with backend:
+        first = await backend.evaluate("1")
+        second = await backend.evaluate("1")
+    for result in (first, second):
+        assert result.error is not None and result.error.code == "login_failed"
+    assert fake.paths["/auth/v1/user/login"] == 1  # never resent
+
+
+async def test_cancelled_during_refresh_still_saves_the_new_pair() -> None:
+    # The service spends the old token as soon as it answers: losing the new
+    # pair to a Ctrl-C would cost an MFA account its week.
+    fake = FakeSaas(mfa=True)
+    store = SaasSessionStore()
+    store.save(API, EMAIL, _saved(fake, access_in=-60))
+    backend = _backend(fake)
+    task = asyncio.ensure_future(backend.evaluate("1"))
+    fake.on_refresh = lambda _token: asyncio.get_running_loop().call_soon(task.cancel)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        saved = store.load(API, EMAIL)
+        if saved is not None and saved.refresh_token in fake.live_refresh:
+            break
+    await backend.aclose()
+    saved = store.load(API, EMAIL)
+    assert saved is not None and saved.refresh_token in fake.live_refresh
+    fake.on_refresh = None
+    assert (await _query(_backend(fake))).ok
+    assert fake.paths["/auth/v1/user/login"] == 0
+
+
+async def test_a_held_lock_times_out_and_goes_ahead(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from bigfix_remote_session_relevance.backends import saas
+
+    monkeypatch.setattr(saas, "LOCK_TIMEOUT_S", 0.2)
+    fake = FakeSaas()
+    store = SaasSessionStore()
+    store.save(API, EMAIL, _saved(fake, access_in=-60))
+    held = store.lock()
+    held.acquire()
+    try:
+        with caplog.at_level(logging.WARNING):
+            result = await _query(_backend(fake))
+    finally:
+        held.release()
+    assert result.ok, result.error
+    assert "going ahead" in caplog.text
+    assert fake.paths["/auth/v1/token/refresh"] == 1
+
+
+async def test_a_prompting_backend_can_answer_after_the_saved_session_ran_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeSaas(mfa=True)
+    SaasSessionStore().save(API, EMAIL, _saved(fake, refresh_in=-60))
+    pool = SaasSessionPool()
+    quiet = _backend(fake)
+    pool.attach(quiet)
+    assert (await quiet.evaluate("1")).ok  # adopted: the access token still works
+    real = time.time
+    monkeypatch.setattr(time, "time", lambda: real() + 3600)
+    failed = await quiet.evaluate("1")
+    assert failed.error is not None and failed.error.code == "totp_required"
+    asking = _backend(fake, totp_prompt=lambda _m: "123456")
+    pool.attach(asking)
+    assert await asking.sign_in() is None
+    for b in (quiet, asking):
+        await b.aclose()
+
+
+async def test_cookies_set_with_a_domain_are_never_sent_twice() -> None:
+    fake = FakeSaas()
+    fake.cookie_domain = "; Domain=api.bigfix.com"
+    SaasSessionStore().save(API, EMAIL, _saved(fake, access_in=-60))
+    backend = _backend(fake)
+    async with backend:
+        assert (await backend.evaluate("1")).ok
+        backend._session.expires_at = time.time() - 1
+        assert (await backend.evaluate("1")).ok
+    assert fake.paths["/auth/v1/token/refresh"] == 2
+    assert fake.most_refresh_cookies == 1

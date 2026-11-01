@@ -223,9 +223,12 @@ class SaasSessionStore:
                         saved = None
                     if saved is None:
                         log.debug("ignoring an unreadable SaaS session in %s", store.name)
-        if saved is None:
-            entry = self._read().get("sessions", {}).get(account)
-            saved = _from_dict(_plain(entry)) if entry is not None else None
+        # The file too, even with a store entry: a save the store refused
+        # went to the file, and the newer of the two is the live pair.
+        entry = self._read().get("sessions", {}).get(account) if self.path.is_file() else None
+        in_file = _from_dict(_plain(entry)) if entry is not None else None
+        if in_file is not None and (saved is None or in_file.stored_at > saved.stored_at):
+            saved = in_file
         if saved is not None and not _email_matches(saved, email):
             log.debug("ignoring a saved SaaS session whose token is for another account")
             return None
@@ -240,6 +243,8 @@ class SaasSessionStore:
                 store.set(account, json.dumps(saved._to_dict()))
             except Exception as exc:  # noqa: BLE001 - too large, locked: the file instead
                 log.debug("cannot save a SaaS session in %s: %s", store.name, type(exc).__name__)
+                with contextlib.suppress(Exception):
+                    store.delete(account)  # no stale copy left to shadow the file's
             else:
                 self._drop_from_file(account)  # one copy, in the better place
                 return
