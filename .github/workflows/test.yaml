@@ -57,6 +57,16 @@ jobs:
       - name: Test
         run: uv run pytest -q -rs
 
+      # Round trips through the runner's own Credential Manager / Keychain
+      # (issue #32): hosted runners are throwaway, and each test uses a unique
+      # service it deletes. The timeout catches a keychain GUI prompt.
+      - name: Test the real OS password store
+        if: runner.os != 'Linux'
+        timeout-minutes: 5
+        env:
+          BFRSR_REAL_SECRET_STORE: "1"
+        run: uv run pytest -q -rs -n0 -m real_secret_store tests/unit/test_secrets.py
+
   # Every dependency is pure Python today, so the package installs on iOS and
   # Android (the iOS app embeds python.org's framework). This keeps a new
   # dependency without wheels there from slipping in unnoticed.
