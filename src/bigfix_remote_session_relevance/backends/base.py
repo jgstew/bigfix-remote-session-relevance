@@ -25,12 +25,14 @@ import httpx
 from .. import local_root_server
 from ..exceptions import ConfigError
 from ..result import ResultError, SessionRelevanceResult
+from ..secrets import DEFAULT_SECRET_STORE
 from ..server_address import ServerAddress, normalize_server
 
 if TYPE_CHECKING:
     from types import TracebackType
 
     from ..config import ConnectionConfig
+    from ..secrets import SecretStore
 
 log = logging.getLogger(__name__)
 
@@ -284,11 +286,24 @@ class Backend(ABC):
         trust: TrustPolicy | None = None,
         prompt: Callable[[str], str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+        save_prompted: Callable[[str], bool] | None = None,
     ) -> Self:
+        """Build from a configured connection.
+
+        ``secrets``: where a ``password_store = "system"`` password is read
+        (default `default_secret_store()`, None for none). ``save_prompted``:
+        asked with the store's name whether to save a prompted password there.
+        """
+        password = (
+            conn.resolve_password(prompt=prompt, secrets=secrets, save_prompted=save_prompted)
+            if conn.auth == "basic"
+            else None
+        )
         return cls(
             conn.address,
             username=conn.username,
-            password=conn.resolve_password(prompt=prompt) if conn.auth == "basic" else None,
+            password=password,
             token=conn.resolve_token(),
             client_cert=conn.client_cert,
             client_key=conn.client_key,

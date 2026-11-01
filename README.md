@@ -82,8 +82,57 @@ BigFix SaaS locks an account after 100 failed logins. See
 for every option. `server` is normally just a host name: `https://` and the
 backend's default port are assumed.
 
-Passwords can live in the file, or better, in environment variables named by
-`password_env`.
+Passwords can live in the file, in environment variables named by
+`password_env`, or in this machine's OS password store.
+
+### Passwords in the OS password store
+
+```toml
+[[connections]]
+name = "lab-root"
+backend = "rest"
+server = "bf.example.com"
+username = "operator"
+password_store = "system"   # no password in the file
+```
+
+`password_store = "system"` keeps the password in this machine's own store:
+the **macOS Keychain** or the **Windows Credential Manager** (through
+[keyring](https://pypi.org/project/keyring/), installed with this package
+there), the iOS app Keychain, or on Linux the Secret Service when the
+`[keyring]` extra is installed (`uvx --from 'bigfix-remote-session-relevance[keyring]' ...`).
+The password is looked up in this order: `password_env`, an inline
+`password`, the store, then a prompt.
+
+The file stays portable. The store entry is keyed by backend, server, port
+and username (not the connection name), so the same file lines up with each
+machine's own entry. A machine with no store, or no entry for it, just
+prompts. So does one whose store fails, such as Windows over key-auth SSH
+(error 1312) or a locked keyring: nothing errors, and `-v -v` logs why. When
+the CLI prompts for such a password, it offers to save it in the store
+(default no).
+
+- `--setup` asks "Save the password in <store> instead of the config file?"
+  when this machine has a store. The answer defaults to **no**, which keeps
+  today's file. On yes, the file gets `password_store = "system"` and no
+  password.
+- `--show-config` shows `password: macOS Keychain` (the store's name), and
+  never the secret.
+- `--forget-password NAME` deletes that connection's entry from the store.
+- Windows entries use "local machine" persistence, so they don't roam with a
+  roaming profile.
+- keyring's own settings still apply. For example,
+  `PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring` turns the store off.
+
+Apps pass their own store as `secrets=` to `AsyncSessionRelevanceClient`,
+`SessionRelevanceClient`, `backend_from_config` or `Backend.from_config`,
+for example `MemorySecretStore`, `KeychainSecretStore()`, or an Android
+Keystore bridge with `name`, `get`, `set` and `delete`. `secrets=None` means
+no store. The default is `default_secret_store()`, which is probed once and
+is `None` when this platform has none. `secret_account(conn)` is the key.
+`save_prompted_password=` (a callable that gets the store's name and returns
+a bool) decides whether a prompted password is saved. Without it, nothing is
+ever saved.
 
 **On a BigFix root server, no setup is needed.** Run as root (Linux) or
 Administrator (Windows) and the server's own REST API credentials are used
@@ -111,6 +160,7 @@ bigfix-remote-session-relevance --keys "id name" \
 echo "number of bes fixlets" | bigfix-remote-session-relevance -
 bigfix-remote-session-relevance --show-config                   # connections, no secrets
 bigfix-remote-session-relevance --show-certs | --trust-cert NAME | --forget-cert HOST:PORT
+bigfix-remote-session-relevance --forget-password NAME          # delete it from the OS password store
 ```
 
 Answers go to stdout; errors and `-v` metadata go to stderr.
@@ -155,7 +205,7 @@ it actually collapses something.
 | Exit code | Meaning |
 |---|---|
 | 0 | every queried deployment answered |
-| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin |
+| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` has no store or it failed |
 | 2 | nothing reachable, or credentials rejected everywhere; `--discover-deployments` found no id |
 | 3 | partial: some deployments failed |
 | 64 | usage or configuration error, or no connection matched `--connection` / `--backend` |
@@ -408,8 +458,10 @@ Removing or changing any of these needs a new major version:
 `ClientQueryResponse`, `ClientQueryRow`, `supports_client_query` and
 `run_setup`, (since 1.4.0) `TrustPolicy` and `ServerAddress`, (since
 1.5.0) `SaasSessionPool`, `backend_from_config` and
-`client_query_max_targets`, and (since 1.6.0) `saas_sign_in` and
-`SaasAccount`, are public and usable, but may change in a minor release
+`client_query_max_targets`, (since 1.6.0) `saas_sign_in` and
+`SaasAccount`, and (since 1.7.0) the password store names `SecretStore`,
+`MemorySecretStore`, `KeyringSecretStore`, `KeychainSecretStore`,
+`default_secret_store` and `secret_account`, are public and usable, but may change in a minor release
 (noted in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

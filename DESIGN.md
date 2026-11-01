@@ -574,8 +574,58 @@ but `rest` or alongside other credentials. With no config file, besapi's `BES_RO
 `BES_USER_NAME` / `BES_PASSWORD` or `~/.besapi.conf` become one `rest`
 connection.
 
-Password resolution: `password_env`, then `password`, then an interactive
+Password resolution: `password_env`, then `password`, then (with
+`password_store = "system"`) the OS password store, then an interactive
 prompt, else an `authentication` error without any request.
+
+### Passwords in the OS password store (`secrets.py`)
+
+`password_store = "system"` is the only value; anything else is a
+`ConfigError`. It counts as basic auth (so not with a token or
+`credentials`). It means "this machine's store", resolved per platform by
+`default_secret_store()`:
+
+| Platform | Store |
+|---|---|
+| macOS, Windows | `KeyringSecretStore` over keyring (a dependency there, pure Python) |
+| Linux | `KeyringSecretStore` if the `[keyring]` extra is installed and has a usable backend, else none |
+| iOS | `KeychainSecretStore` (`ctypes`, Security.framework; `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`) |
+| Android, others | none; the app passes its own |
+
+- **Key:** `secret_account(conn)` is `backend:host:port:username` (username
+  lowercased), under service `bigfix-remote-session-relevance`. It isn't the
+  connection name, so renaming keeps the secret and one file maps onto each
+  machine's own entry. On macOS keyring's items and `KeychainSecretStore`'s
+  are the same Keychain items.
+- **Never breaks a shared file.** `default_secret_store()` probes once per
+  process (one `get` of an account no connection has). It returns `None` on
+  any exception, for keyring's `fail` and `null` backends, and on Android.
+  During resolution, a store that is missing, empty, or raises anything
+  (Windows over SSH raises `pywintypes.error` 1312, not a `KeyringError`) is
+  logged at DEBUG and skipped.
+- **Lazy:** neither keyring nor `ctypes` is imported by `import` or
+  `load_config`, only when a `password_store` password is resolved, or by
+  `--show-config` / `--setup` / `--forget-password`.
+- **Windows:** keyring's default persistence, "enterprise", roams with a
+  roaming profile. The store uses a fresh `WinVaultKeyring` set to "local
+  machine", which leaves the process-wide backend alone.
+- **Injection:** `secrets=` on `ConnectionConfig.resolve_password`,
+  `Backend.from_config`, `backend_from_config`, both clients and
+  `run_setup`. The default is `default_secret_store()`; `None` means no
+  store. A prompted password is saved only when `save_prompted` /
+  `save_prompted_password` (given the store's name) returns True. The CLI
+  asks, default no, and only when interactive.
+- **Opt-in:** the wizard offers the store, defaulting to no, only when one
+  exists. On yes it writes `password_store` and no `password`. If the store
+  write fails, it says so and saves the password in the file as before.
+  `--show-config` shows the store's name and never reads the store, since on
+  macOS a read can ask the user to allow access. `--forget-password NAME`
+  deletes the entry.
+- **Tests** never reach a real store: conftest pins the default to `None`
+  and keyring to its `fail` backend. The real round trips are marked
+  `real_secret_store` and run only with `BFRSR_REAL_SECRET_STORE=1`, under a
+  unique service, cleaned up, and without changing `HOME`. A changed `HOME`
+  makes Security.framework show a dialog, and the test hangs.
 
 ### Local root server credentials
 

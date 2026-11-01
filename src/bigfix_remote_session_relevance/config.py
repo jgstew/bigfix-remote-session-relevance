@@ -19,18 +19,23 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import tomlkit
 import tomlkit.exceptions
 from tomlkit.items import AoT
 
 from . import local_root_server
+from . import secrets as secret_stores
 from .deployment import is_deployment_id
 from .exceptions import ConfigError
 from .local_root_server import LOCAL_ROOT_SERVER
 from .paths import data_dir
+from .secrets import DEFAULT_SECRET_STORE
 from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
+
+if TYPE_CHECKING:
+    from .secrets import SecretStore
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +49,8 @@ _SID_RE = re.compile(r"^bf\d+$")
 # A root server's RESTURL is normally https://localhost:52311/api.
 _LOCAL_SERVER_PLACEHOLDER = "localhost"
 _LOCAL_LABEL = "local root server"
+# password_store values. "system": this machine's OS store (secrets.py).
+PASSWORD_STORE_SYSTEM = "system"  # noqa: S105 - a setting, not a secret
 
 _BACKEND_ALIASES = {
     "rest": "rest",
@@ -76,6 +83,7 @@ _KEY_ALIASES = {
     "user": "username",
     "password": "password",
     "password_env": "password_env",
+    "password_store": "password_store",
     "token": "token",
     "api_key": "token",
     "api_token": "token",
@@ -119,6 +127,9 @@ class ConnectionConfig:
     username: str | None = None
     password: str | None = field(default=None, repr=False)
     password_env: str | None = None
+    # "system": the password lives in this machine's OS store, under
+    # secret_account(self); a machine without one falls through to the prompt.
+    password_store: str | None = None
     token: str | None = field(default=None, repr=False)
     token_env: str | None = None
     client_cert: str | None = None
@@ -153,17 +164,69 @@ class ConnectionConfig:
             return "mtls"
         return "basic"
 
-    def resolve_password(self, *, prompt: Callable[[str], str] | None = None) -> str | None:
-        """``password_env`` if set, else inline ``password``, else ``prompt``."""
+    def resolve_password(
+        self,
+        *,
+        prompt: Callable[[str], str] | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+        save_prompted: Callable[[str], bool] | None = None,
+    ) -> str | None:
+        """``password_env`` if set, else inline ``password``, else the store, else ``prompt``.
+
+        The store is read only with ``password_store = "system"``: ``secrets``,
+        by default `default_secret_store()`; None means none. A missing or
+        empty store, or any error from it, falls through to the prompt. A
+        prompted password is saved to the store only if ``save_prompted``
+        (called with the store's name) says so.
+        """
         if self.password_env:
             value = os.environ.get(self.password_env)
             if value:
                 return value
         if self.password is not None:
             return self.password
-        if prompt is not None and self.username is not None:
-            return prompt(f"Password for {self.username} on {self.name}: ")
-        return None
+        store = self._secret_store(secrets)
+        if store is not None:
+            try:
+                found = store.get(secret_stores.secret_account(self))
+            except Exception as exc:  # noqa: BLE001 - any store failure falls through
+                # Debug only: on a machine without a working store (Windows
+                # over SSH, a locked keyring) this is expected, every run.
+                log.debug(
+                    "%s: cannot read the password from %s (%s); falling back",
+                    self.name,
+                    store.name,
+                    type(exc).__name__,
+                )
+            else:
+                if found:
+                    return found
+                log.debug("%s: no password in %s; falling back", self.name, store.name)
+        if prompt is None or self.username is None:
+            return None
+        answer = prompt(f"Password for {self.username} on {self.name}: ")
+        if answer and store is not None and save_prompted is not None and save_prompted(store.name):
+            try:
+                store.set(secret_stores.secret_account(self), answer)
+            except Exception as exc:  # noqa: BLE001 - the password still works
+                log.warning(
+                    "%s: could not save the password in %s: %s",
+                    self.name,
+                    store.name,
+                    type(exc).__name__,
+                )
+        return answer
+
+    def _secret_store(self, secrets_arg: SecretStore | None) -> SecretStore | None:
+        if self.password_store != PASSWORD_STORE_SYSTEM:
+            return None
+        if secrets_arg is not DEFAULT_SECRET_STORE:
+            return secrets_arg
+        try:
+            return secret_stores.default_secret_store()
+        except Exception as exc:  # noqa: BLE001 - no store, not a failed run
+            log.debug("no OS password store: %s", type(exc).__name__)
+            return None
 
     def resolve_token(self) -> str | None:
         if self.token_env:
@@ -407,6 +470,8 @@ def _connection_from_mapping(raw: Any, index: int) -> ConnectionConfig:
             values[key] = str(Path(values[key]).expanduser())
     if "verify" in values:
         values["verify"] = _validate_verify(values["verify"], where)
+    if "password_store" in values:
+        values["password_store"] = _validate_password_store(values["password_store"], where)
     for key in ("connect_timeout", "read_timeout"):
         if key in values:
             values[key] = float(values[key])
@@ -427,6 +492,12 @@ def _validate_credentials(value: Any, where: str) -> str:
     return LOCAL_ROOT_SERVER
 
 
+def _validate_password_store(value: Any, where: str) -> str:
+    if not isinstance(value, str) or value.strip().lower() != PASSWORD_STORE_SYSTEM:
+        raise ConfigError(f'{where}: password_store must be "{PASSWORD_STORE_SYSTEM}"')
+    return PASSWORD_STORE_SYSTEM
+
+
 def _validate_auth(conn: ConnectionConfig, where: str) -> None:
     try:
         address = conn.address
@@ -434,7 +505,10 @@ def _validate_auth(conn: ConnectionConfig, where: str) -> None:
         raise ConfigError(f"{where}: {exc}") from exc
     has_token = conn.token is not None or conn.token_env is not None
     has_basic = (
-        conn.username is not None or conn.password is not None or conn.password_env is not None
+        conn.username is not None
+        or conn.password is not None
+        or conn.password_env is not None
+        or conn.password_store is not None
     )
     if conn.credentials == LOCAL_ROOT_SERVER:
         if conn.backend != "rest":
@@ -647,8 +721,14 @@ def _atomic_write(path: Path, text: str) -> None:
 # -- display ------------------------------------------------------------------
 
 
-def redacted_summary(config: Config) -> list[dict[str, Any]]:
-    """Rows for ``--show-config``: what is configured, never the secrets."""
+def redacted_summary(
+    config: Config, *, secrets: SecretStore | None = DEFAULT_SECRET_STORE
+) -> list[dict[str, Any]]:
+    """Rows for ``--show-config``: what is configured, never the secrets.
+
+    A ``password_store`` password shows the store's name; the store itself
+    is not read (on macOS a read can ask the user to allow access).
+    """
     rows: list[dict[str, Any]] = []
     for c in config.connections:
         try:
@@ -663,7 +743,11 @@ def redacted_summary(config: Config) -> list[dict[str, Any]]:
                 "server": server,
                 "auth": c.auth,
                 "username": _LOCAL_LABEL if local else "set" if c.username else "unset",
-                "password": _LOCAL_LABEL if local else _secret_state(c.password, c.password_env),
+                "password": _LOCAL_LABEL
+                if local
+                else _password_state(c, secrets)
+                if c.password_store
+                else _secret_state(c.password, c.password_env),
                 "token": _secret_state(c.token, c.token_env),
                 "client_cert": "set" if c.client_cert else "unset",
                 "deployment_id": c.deployment_id,
@@ -675,6 +759,13 @@ def redacted_summary(config: Config) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _password_state(conn: ConnectionConfig, secrets_arg: SecretStore | None) -> str:
+    if conn.password_env or conn.password is not None:
+        return _secret_state(conn.password, conn.password_env)
+    store = conn._secret_store(secrets_arg)
+    return store.name if store is not None else "system store (none on this machine)"
 
 
 def _secret_state(inline: str | None, env_name: str | None) -> str:

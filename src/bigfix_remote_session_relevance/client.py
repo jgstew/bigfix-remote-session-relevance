@@ -38,6 +38,7 @@ from .escapes import escape_result
 from .exceptions import ConfigError
 from .result import ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .secrets import DEFAULT_SECRET_STORE, SecretStore
 from .trust import TrustStore
 
 if TYPE_CHECKING:
@@ -86,6 +87,8 @@ class AsyncSessionRelevanceClient:
         discover: bool = True,
         record_deployment_ids: bool = True,
         transport_factory: TransportFactory | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+        save_prompted_password: Callable[[str], bool] | None = None,
     ) -> None:
         if config is None:
             config = load_config()
@@ -99,6 +102,10 @@ class AsyncSessionRelevanceClient:
         self.discover = discover
         self.record_deployment_ids = record_deployment_ids
         self._prompt = prompt
+        # password_store = "system" passwords: where they are read, and
+        # whether a prompted one is saved there (asked with the store's name).
+        self._secrets = secrets
+        self._save_prompted = save_prompted_password
         self._transport_factory = transport_factory
         self._trust: TrustPolicy | None = TrustStore() if isinstance(trust, _Default) else trust
         self._max_concurrency = max(1, max_concurrency)
@@ -242,7 +249,12 @@ class AsyncSessionRelevanceClient:
             if conn.name not in self._backends:
                 transport = self._transport_factory(conn) if self._transport_factory else None
                 backend = backend_from_config(
-                    conn, trust=self._trust, prompt=self._prompt, transport=transport
+                    conn,
+                    trust=self._trust,
+                    prompt=self._prompt,
+                    transport=transport,
+                    secrets=self._secrets,
+                    save_prompted=self._save_prompted,
                 )
                 backend.deployment_id = self._deployment_ids[conn.name]
                 if isinstance(backend, SaasBackend):

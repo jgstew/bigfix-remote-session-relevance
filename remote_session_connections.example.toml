@@ -24,6 +24,7 @@ backend = "rest"
 server = "bigfix.example.com"          # -> https://bigfix.example.com:52311
 username = "<USERNAME>"
 password_env = "BFRSR_PROD_PASSWORD"   # preferred; or: password = "..."
+# or: password_store = "system"         # this machine's Keychain / Credential Manager
 # deployment_id is written automatically (sha256 of gather url of bes license)
 
 [[connections]]
