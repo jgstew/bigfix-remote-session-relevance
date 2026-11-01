@@ -54,6 +54,9 @@ keyring = ["keyring>=25"]
 # default — an optional-dependencies extra would need `--extra dev` every time.
 [dependency-groups]
 dev = [
+  # A dependency only on macOS/Windows; here so Linux CI type-checks and
+  # tests secrets.py too (conftest keeps tests off any real store).
+  "keyring>=25",
   "mypy>=1.10",
   "pyright>=1.1.400",
   "pytest>=8",

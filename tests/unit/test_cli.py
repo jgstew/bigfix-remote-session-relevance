@@ -673,6 +673,13 @@ def test_forget_password_deletes_the_store_entry(
     assert "forgot the password for lab in memory" in capsys.readouterr().out
 
 
+def test_forget_password_with_nothing_stored(
+    store_config: Path, os_store: MemorySecretStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--forget-password", "lab"]) == 1
+    assert "no password for lab in memory" in capsys.readouterr().err
+
+
 def test_forget_password_without_a_store(
     store_config: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -693,7 +700,9 @@ def test_forget_password_store_error_is_reported(
         def delete(self, account: str) -> None:
             raise OSError(1312, "CredDelete")
 
-    monkeypatch.setattr(secrets, "_default_store", Broken())
+    broken = Broken()
+    broken.set(_lab_account(), "old")
+    monkeypatch.setattr(secrets, "_default_store", broken)
     assert _run(["--forget-password", "lab"]) == 1
     assert "could not delete" in capsys.readouterr().err
 

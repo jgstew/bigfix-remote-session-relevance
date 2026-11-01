@@ -89,7 +89,7 @@ def test_import_does_not_read_package_metadata() -> None:
 def _keyring_requirement() -> Any:
     from packaging.requirements import Requirement
 
-    (found,) = [r for r in map(Requirement, _project()["dependencies"]) if r.name == "keyring"]
+    (found,) = (r for r in map(Requirement, _project()["dependencies"]) if r.name == "keyring")
     return found
 
 

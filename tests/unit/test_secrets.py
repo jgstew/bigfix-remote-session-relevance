@@ -233,6 +233,57 @@ def test_default_store_is_probed_once(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [1]
 
 
+def test_a_failed_probe_is_tried_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A locked keyring at startup must not turn the store off for a
+    # long-running app's whole life; "no store here" answers are kept.
+    answers: list[Any] = [RuntimeError("locked"), MemorySecretStore()]
+
+    def probe() -> SecretStore | None:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise secrets._ProbeFailedError from answer
+        return answer  # type: ignore[no-any-return]
+
+    monkeypatch.setattr(secrets, "_default_store", secrets._UNPROBED)
+    monkeypatch.setattr(secrets, "_probe_default_store", probe)
+    assert default_secret_store() is None
+    first = default_secret_store()
+    assert isinstance(first, MemorySecretStore)
+    assert default_secret_store() is first
+
+
+def test_probe_failure_is_reported_as_retryable(
+    monkeypatch: pytest.MonkeyPatch, fake_keyring: types.SimpleNamespace
+) -> None:
+    class Locked(FakeBackend):
+        def get_password(self, service: str, username: str) -> str | None:
+            raise RuntimeError("KeyringLocked")
+
+    fake_keyring.backend = Locked()
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(secrets._ProbeFailedError):
+        secrets._probe_default_store()
+
+
+def test_keyring_store_unwraps_the_chainer() -> None:
+    # With a second backend installed (keyrings.alt), keyring returns its
+    # chainer; writes go to the first backend, so that is the one used.
+    win = type("WinVaultKeyring", (FakeBackend,), {"__module__": "keyring.backends.Windows"})
+    chainer = type("ChainerBackend", (FakeBackend,), {"__module__": "keyring.backends.chainer"})()
+    chainer.backends = [win(), FakeBackend()]  # type: ignore[attr-defined]
+    store = KeyringSecretStore(backend=chainer)
+    assert store.name == "Windows Credential Manager"
+    assert store._backend.persist == "local machine"
+
+
+def test_keyring_store_delete_with_a_custom_backend_needs_no_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    monkeypatch.setitem(sys.modules, "keyring.errors", None)
+    KeyringSecretStore(backend=FakeBackend()).delete("never-set")
+
+
 def test_probe_uses_keyring_on_desktop(
     monkeypatch: pytest.MonkeyPatch, fake_keyring: types.SimpleNamespace
 ) -> None:
@@ -272,7 +323,8 @@ def test_probe_none_when_the_store_fails(
 
     fake_keyring.backend = NoLogonSession()
     monkeypatch.setattr(sys, "platform", "win32")
-    assert secrets._probe_default_store() is None
+    monkeypatch.setattr(secrets, "_default_store", secrets._UNPROBED)
+    assert default_secret_store() is None
 
 
 @pytest.mark.parametrize("platform", ["android"])
@@ -302,7 +354,8 @@ def test_probe_none_when_the_ios_keychain_is_unusable(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(sys, "platform", "ios")
     monkeypatch.setattr(secrets, "KeychainSecretStore", NoEntitlement)
-    assert secrets._probe_default_store() is None
+    monkeypatch.setattr(secrets, "_default_store", secrets._UNPROBED)
+    assert default_secret_store() is None
 
 
 def test_keychain_error_says_the_status() -> None:
@@ -316,11 +369,14 @@ def test_import_does_not_load_keyring_or_ctypes() -> None:
     # import or ctypes.
     import subprocess
 
+    # On Windows something below this package (as on main) already loads
+    # ctypes, so only keyring is checked there.
     code = (
         "import sys; import bigfix_remote_session_relevance as p; "
         "p.load_config(); "
         "assert 'keyring' not in sys.modules, 'keyring imported eagerly'; "
-        "assert 'ctypes' not in sys.modules, 'ctypes imported eagerly'"
+        "assert sys.platform == 'win32' or 'ctypes' not in sys.modules, "
+        "'ctypes imported eagerly'"
     )
     env = {**os.environ, "BFRSR_LOCAL_ROOT_SERVER": "0"}
     subprocess.run([sys.executable, "-c", code], check=True, env=env)  # noqa: S603

@@ -226,7 +226,7 @@ def test_store_errors_fall_through_and_log_at_debug(caplog: pytest.LogCaptureFix
     with caplog.at_level(logging.DEBUG, logger="bigfix_remote_session_relevance"):
         assert _conn().resolve_password(prompt=Prompt(), secrets=store) == "typed"
     assert store.calls == 1
-    (record,) = [r for r in caplog.records if "Windows Credential Manager" in r.getMessage()]
+    (record,) = (r for r in caplog.records if "Windows Credential Manager" in r.getMessage())
     assert record.levelno == logging.DEBUG
     assert "lab" in record.getMessage()
 
@@ -253,41 +253,95 @@ def test_one_file_works_with_and_without_a_store(tmp_path: Path) -> None:
 
 
 # -- saving a prompted password ----------------------------------------------------------
+# Offered when the backend is built, written only once the server accepts the
+# password: a typo saved in the store would otherwise be resent on every run
+# (and failed BigFix SaaS logins lock the account).
 
 
-def test_prompted_password_is_saved_when_the_callback_agrees() -> None:
-    conn, store = _conn(), MemorySecretStore()
-    offered: list[str] = []
+def _ok(request: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
 
-    def save(store_name: str) -> bool:
-        offered.append(store_name)
+
+def _backend(store: Any, handler: Any, save: Any = lambda _: True, **kw: Any) -> RestBackend:
+    return RestBackend.from_config(
+        _conn(verify=True, **kw),
+        trust=None,
+        prompt=Prompt(),
+        secrets=store,
+        save_prompted=save,
+        transport=httpx.MockTransport(handler),
+    )
+
+
+async def test_prompted_password_is_saved_after_the_server_accepts_it() -> None:
+    store, offered = MemorySecretStore(), []
+
+    def save(name: str) -> bool:
+        offered.append(name)
         return True
 
-    assert conn.resolve_password(prompt=Prompt(), secrets=store, save_prompted=save) == "typed"
-    assert offered == ["memory"]
-    assert store.get(secret_account(conn)) == "typed"
+    async with _backend(store, _ok, save) as backend:
+        assert offered == ["memory"]
+        assert store.get(secret_account(_conn())) is None  # not before any request
+        assert (await backend.evaluate("1")).ok
+    assert store.get(secret_account(_conn())) == "typed"
 
 
-def test_prompted_password_is_not_saved_when_declined() -> None:
-    conn, store = _conn(), MemorySecretStore()
-    conn.resolve_password(prompt=Prompt(), secrets=store, save_prompted=lambda _: False)
-    assert store.get(secret_account(conn)) is None
+async def test_session_relevance_error_still_proves_the_password() -> None:
+    def error(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, text='Error: The operator "x" is not defined.')
+
+    store = MemorySecretStore()
+    async with _backend(store, error) as backend:
+        result = await backend.evaluate("x")
+    assert result.error is not None and result.error.kind == "session_relevance"
+    assert store.get(secret_account(_conn())) == "typed"
 
 
-def test_prompted_password_is_never_saved_implicitly() -> None:
-    conn, store = _conn(), MemorySecretStore()
-    conn.resolve_password(prompt=Prompt(), secrets=store)
-    assert store.get(secret_account(conn)) is None
+async def test_rejected_password_is_never_saved() -> None:
+    calls: list[int] = []
+
+    def reject_once(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(401, text="Login failed") if len(calls) == 1 else _ok(request)
+
+    store = MemorySecretStore()
+    async with _backend(store, reject_once) as backend:
+        first = await backend.evaluate("1")
+        assert first.error is not None and first.error.kind == "authentication"
+        assert (await backend.evaluate("1")).ok  # even a later success saves nothing
+    assert store.get(secret_account(_conn())) is None
 
 
-def test_empty_prompt_answer_is_not_offered() -> None:
-    offered: list[str] = []
-    _conn().resolve_password(
-        prompt=Prompt(""),
-        secrets=MemorySecretStore(),
-        save_prompted=lambda name: offered.append(name) or True,
-    )
-    assert offered == []
+async def test_save_waits_out_a_connection_error() -> None:
+    calls = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ConnectError("refused")
+        return _ok(request)
+
+    store = MemorySecretStore()
+    async with _backend(store, flaky) as backend:
+        assert (await backend.evaluate("1")).error is not None
+        assert store.get(secret_account(_conn())) is None
+        assert (await backend.evaluate("1")).ok
+    assert store.get(secret_account(_conn())) == "typed"
+
+
+async def test_prompted_password_is_not_saved_when_declined() -> None:
+    store = MemorySecretStore()
+    async with _backend(store, _ok, lambda _: False) as backend:
+        await backend.evaluate("1")
+    assert store.get(secret_account(_conn())) is None
+
+
+async def test_prompted_password_is_never_saved_implicitly() -> None:
+    store = MemorySecretStore()
+    async with _backend(store, _ok, None) as backend:
+        await backend.evaluate("1")
+    assert store.get(secret_account(_conn())) is None
 
 
 def test_save_is_not_offered_without_password_store_or_a_store() -> None:
@@ -297,14 +351,30 @@ def test_save_is_not_offered_without_password_store_or_a_store() -> None:
         offered.append(name)
         return True
 
-    _conn(password_store=None).resolve_password(
-        prompt=Prompt(), secrets=MemorySecretStore(), save_prompted=save
-    )
-    _conn().resolve_password(prompt=Prompt(), secrets=None, save_prompted=save)
+    _backend(MemorySecretStore(), _ok, save, password_store=None)
+    _backend(None, _ok, save)
     assert offered == []
 
 
-def test_failed_save_warns_and_still_returns_the_password(
+def test_save_is_not_offered_after_the_store_failed_to_read() -> None:
+    offered: list[str] = []
+    _backend(RaisingStore(), _ok, lambda name: offered.append(name) or True)
+    assert offered == []
+
+
+def test_empty_prompt_answer_is_not_offered() -> None:
+    offered: list[str] = []
+    RestBackend.from_config(
+        _conn(verify=True),
+        trust=None,
+        prompt=Prompt(""),
+        secrets=MemorySecretStore(),
+        save_prompted=lambda name: offered.append(name) or True,
+    )
+    assert offered == []
+
+
+async def test_failed_save_warns_and_the_query_still_answers(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class ReadOnly(MemorySecretStore):
@@ -312,10 +382,8 @@ def test_failed_save_warns_and_still_returns_the_password(
             raise OSError("read-only")
 
     with caplog.at_level(logging.WARNING):
-        got = _conn().resolve_password(
-            prompt=Prompt(), secrets=ReadOnly(), save_prompted=lambda _: True
-        )
-    assert got == "typed"
+        async with _backend(ReadOnly(), _ok) as backend:
+            assert (await backend.evaluate("1")).ok
     assert any("could not save" in r.getMessage() for r in caplog.records)
     assert all("typed" not in r.getMessage() for r in caplog.records)
 
@@ -354,23 +422,31 @@ def test_redacted_summary_inline_and_env_still_win() -> None:
 # -- injection: from_config and the clients ---------------------------------------------
 
 
-def _ok(request: httpx.Request) -> httpx.Response:
-    return httpx.Response(200, json={"result": [1], "plural": False, "type": "integer"})
-
-
 def test_from_config_reads_the_injected_store() -> None:
     conn = _conn(verify=True)
     backend = RestBackend.from_config(conn, trust=None, secrets=_stored(conn))
     assert backend._password == "from-store"
 
 
-def test_backend_from_config_passes_secrets_and_save_prompted() -> None:
+async def test_backend_from_config_passes_secrets_and_save_prompted() -> None:
     conn, store = _conn(verify=True), MemorySecretStore()
     backend = backend_from_config(
-        conn, trust=None, prompt=Prompt(), secrets=store, save_prompted=lambda _: True
+        conn,
+        trust=None,
+        prompt=Prompt(),
+        secrets=store,
+        save_prompted=lambda _: True,
+        transport=httpx.MockTransport(_ok),
     )
-    assert backend._password == "typed"
+    async with backend:
+        assert backend._password == "typed"
+        await backend.evaluate("1")
     assert store.get(secret_account(conn)) == "typed"
+
+
+def test_password_store_is_validated_in_code_too() -> None:
+    with pytest.raises(ConfigError, match="password_store"):
+        _conn(password_store="keychain")
 
 
 async def test_async_client_takes_secrets() -> None:

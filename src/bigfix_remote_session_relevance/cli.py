@@ -404,8 +404,12 @@ def _forget_password(config: Config, name: str) -> int:
     if store is None:
         print("no OS password store on this machine", file=sys.stderr)
         return 1
+    account = secrets.secret_account(conn)
     try:
-        store.delete(secrets.secret_account(conn))
+        if store.get(account) is None:
+            print(f"no password for {name} in {store.name}", file=sys.stderr)
+            return 1
+        store.delete(account)
     except Exception as exc:  # noqa: BLE001 - any store failure, reported plainly
         print(f"could not delete the password from {store.name}: {exc}", file=sys.stderr)
         return 1

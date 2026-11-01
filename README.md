@@ -110,12 +110,15 @@ machine's own entry. A machine with no store, or no entry for it, just
 prompts. So does one whose store fails, such as Windows over key-auth SSH
 (error 1312) or a locked keyring: nothing errors, and `-v -v` logs why. When
 the CLI prompts for such a password, it offers to save it in the store
-(default no).
+(default no). The password is written only after the server accepts it, so
+a typo is never saved. A stored password that has since changed fails with
+an authentication error; `--forget-password NAME` clears it.
 
 - `--setup` asks "Save the password in <store> instead of the config file?"
   when this machine has a store. The answer defaults to **no**, which keeps
   today's file. On yes, the file gets `password_store = "system"` and no
-  password.
+  password. If the store then fails, setup asks again: config file or
+  environment variable.
 - `--show-config` shows `password: macOS Keychain` (the store's name), and
   never the secret.
 - `--forget-password NAME` deletes that connection's entry from the store.
@@ -131,7 +134,8 @@ Keystore bridge with `name`, `get`, `set` and `delete`. `secrets=None` means
 no store. The default is `default_secret_store()`, which is probed once and
 is `None` when this platform has none. `secret_account(conn)` is the key.
 `save_prompted_password=` (a callable that gets the store's name and returns
-a bool) decides whether a prompted password is saved. Without it, nothing is
+a bool) decides whether a prompted password is saved. It is written once a
+response shows the server accepted it. Without the callable, nothing is
 ever saved.
 
 **On a BigFix root server, no setup is needed.** Run as root (Linux) or
@@ -205,7 +209,7 @@ it actually collapses something.
 | Exit code | Meaning |
 |---|---|
 | 0 | every queried deployment answered |
-| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` has no store or it failed |
+| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` found no store or no entry, or the store failed |
 | 2 | nothing reachable, or credentials rejected everywhere; `--discover-deployments` found no id |
 | 3 | partial: some deployments failed |
 | 64 | usage or configuration error, or no connection matched `--connection` / `--backend` |

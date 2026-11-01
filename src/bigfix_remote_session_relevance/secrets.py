@@ -19,7 +19,6 @@ An app passes its own `SecretStore` (an Android Keystore bridge, say) as
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import sys
 from typing import TYPE_CHECKING, Any, Final, Protocol
@@ -108,6 +107,12 @@ class KeyringSecretStore:
             import keyring
 
             backend = keyring.get_keyring()
+        if type(backend).__module__ == "keyring.backends.chainer" and getattr(
+            backend, "backends", None
+        ):
+            # Several backends installed (keyrings.alt, say): the chainer
+            # writes to its first, highest-priority one, so use that directly.
+            backend = backend.backends[0]
         if type(backend).__name__ == "WinVaultKeyring":
             # keyring's default, "enterprise", roams with a roaming profile;
             # these secrets stay on this machine. A new instance, so the
@@ -130,10 +135,13 @@ class KeyringSecretStore:
         self._backend.set_password(self.service, account, secret)
 
     def delete(self, account: str) -> None:
-        from keyring.errors import PasswordDeleteError
-
-        with contextlib.suppress(PasswordDeleteError):  # nothing to delete
+        try:
             self._backend.delete_password(self.service, account)
+        except Exception as exc:
+            # keyring.errors.PasswordDeleteError: nothing to delete. Matched
+            # by name, so a store over a custom backend needs no keyring.
+            if type(exc).__name__ != "PasswordDeleteError":
+                raise
 
 
 # -- Apple Keychain via ctypes (iOS) -------------------------------------------------
@@ -322,16 +330,32 @@ _UNPROBED: Final = object()
 _default_store: object = _UNPROBED
 
 
+class _ProbeFailedError(Exception):
+    """The store exists but failed this time (locked, no logon session)."""
+
+
 def default_secret_store() -> SecretStore | None:
-    """This platform's store, or None. Probed once per process."""
+    """This platform's store, or None.
+
+    The answer is kept for the process, except after a failure: a keyring
+    locked at startup is tried again on the next call, so a long-running
+    app picks it up once unlocked. Concurrent first calls may both probe;
+    either result is the same store.
+    """
     global _default_store
     if _default_store is _UNPROBED:
-        _default_store = _probe_default_store()
+        try:
+            _default_store = _probe_default_store()
+        except _ProbeFailedError as exc:
+            cause = exc.__cause__
+            log.debug("no OS password store for now: %s: %s", type(cause).__name__, cause)
+            return None
     found: SecretStore | None = _default_store  # type: ignore[assignment]
     return found
 
 
 def _probe_default_store() -> SecretStore | None:
+    """The store, or None when this platform has none; raises _ProbeFailedError."""
     store: SecretStore
     try:
         if sys.platform == "ios":
@@ -350,9 +374,10 @@ def _probe_default_store() -> SecretStore | None:
                 return None
             store = KeyringSecretStore(backend=backend)
         store.get(_PROBE_ACCOUNT)
-    except Exception as exc:  # noqa: BLE001 - any failure means "no store here"
-        log.debug("no OS password store: %s: %s", type(exc).__name__, exc)
-        return None
+    except Exception as exc:
+        # Any failure (Windows 1312 over SSH, KeyringLocked, iOS
+        # errSecMissingEntitlement) means "no store", but maybe only for now.
+        raise _ProbeFailedError from exc
     return store
 
 

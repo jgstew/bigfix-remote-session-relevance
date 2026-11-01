@@ -384,22 +384,7 @@ def run_setup(
     use_store = secret_store is not None and input_fn(
         f"Save the password in {secret_store.name} instead of the config file? [y/N] "
     ).strip().lower() in ("y", "yes")
-    store = (
-        ""
-        if use_store
-        else input_fn(
-            "Store the password in the config file (mode 0600) [f], or read it from an "
-            "environment variable [e]? [F/e] "
-        )
-        .strip()
-        .lower()
-    )
-    password_env: str | None = None
-    if store.startswith("e"):
-        bare = split_server(host)[1].upper()
-        default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', bare).strip('_')}_PASSWORD"
-        password_env = input_fn(f"Environment variable name [{default_env}]: ").strip()
-        password_env = password_env or default_env
+    password_env = None if use_store else _ask_file_or_env(host, input_fn)
 
     try:
         existing = {c.name for c in load_config(path).connections} if path.is_file() else set()
@@ -447,10 +432,14 @@ def run_setup(
             )
             try:
                 secret_store.set(secret_account(in_store), password)
-            except Exception as exc:  # noqa: BLE001 - any store failure: keep today's file
-                say(
-                    f"could not save the password in {secret_store.name} "
-                    f"({type(exc).__name__}); storing it in the config file instead"
+            except Exception as exc:  # noqa: BLE001 - any store failure: ask, as without one
+                # The user chose not to have it in the file: ask again rather
+                # than write it there quietly. The answer covers the rest too.
+                say(f"could not save the password in {secret_store.name} ({type(exc).__name__})")
+                use_store = False
+                password_env = _ask_file_or_env(host, input_fn)
+                conn = dataclasses.replace(
+                    conn, password=None if password_env else password, password_env=password_env
                 )
             else:
                 conn = in_store
@@ -468,6 +457,23 @@ def run_setup(
     else:
         say("Nothing saved.")
     return 0
+
+
+def _ask_file_or_env(host: str, input_fn: InputFn) -> str | None:
+    """The ``password_env`` name to use, or None to keep the password in the file."""
+    answer = (
+        input_fn(
+            "Store the password in the config file (mode 0600) [f], or read it from an "
+            "environment variable [e]? [F/e] "
+        )
+        .strip()
+        .lower()
+    )
+    if not answer.startswith("e"):
+        return None
+    bare = split_server(host)[1].upper()
+    default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', bare).strip('_')}_PASSWORD"
+    return input_fn(f"Environment variable name [{default_env}]: ").strip() or default_env
 
 
 def _config_server(backend: str, address: ServerAddress) -> str:

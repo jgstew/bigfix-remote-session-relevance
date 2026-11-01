@@ -117,6 +117,7 @@ keyring = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "keyring" },
     { name = "mypy" },
     { name = "pyright" },
     { name = "pytest" },
@@ -142,6 +143,7 @@ provides-extras = ["keyring"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "keyring", specifier = ">=25" },
     { name = "mypy", specifier = ">=1.10" },
     { name = "pyright", specifier = ">=1.1.400" },
     { name = "pytest", specifier = ">=8" },

@@ -1104,7 +1104,8 @@ def test_setup_store_failure_falls_back_to_the_file(
             raise OSError(1312, "CredWrite")
 
     path = tmp_path / "c.toml"
-    ask = _answers("bf.example.com", "op", "y", "n", "y", "", "n")
+    # store? yes; save rest; the store fails, so file or env var is asked then.
+    ask = _answers("bf.example.com", "op", "y", "n", "y", "", "f", "n")
     code = run_setup(
         path,
         input_fn=ask,
@@ -1117,6 +1118,27 @@ def test_setup_store_failure_falls_back_to_the_file(
     assert conn.password == "pw"
     assert conn.password_store is None
     assert "could not save the password in memory" in capsys.readouterr().err
+
+
+def test_setup_store_failure_can_switch_to_an_env_var(tmp_path: Path) -> None:
+    class Broken(MemorySecretStore):
+        def set(self, account: str, secret: str) -> None:
+            raise OSError(1312, "CredWrite")
+
+    path = tmp_path / "c.toml"
+    # store? yes; save explorer (fails -> env var), save rest (env var, no re-ask).
+    ask = _answers("bf.example.com", "op", "y", "y", "", "e", "", "y", "", "n")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+        secrets=Broken(),
+    )
+    assert code == 0
+    assert "pw" not in path.read_text().replace("password_env", "")
+    conns = load_config(path).connections
+    assert {c.password_env for c in conns} == {"BFRSR_BF_EXAMPLE_COM_PASSWORD"}
 
 
 def test_setup_saas_store_yes(tmp_path: Path) -> None:

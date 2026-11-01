@@ -597,9 +597,12 @@ prompt, else an `authentication` error without any request.
   connection name, so renaming keeps the secret and one file maps onto each
   machine's own entry. On macOS keyring's items and `KeychainSecretStore`'s
   are the same Keychain items.
-- **Never breaks a shared file.** `default_secret_store()` probes once per
-  process (one `get` of an account no connection has). It returns `None` on
-  any exception, for keyring's `fail` and `null` backends, and on Android.
+- **Never breaks a shared file.** `default_secret_store()` probes with one
+  `get` of an account no connection has. It returns `None` for keyring's
+  `fail` and `null` backends and on Android, and keeps that answer (or the
+  store) for the process. On any exception it also returns `None`, but
+  probes again on the next call, so a keyring that was locked at startup is
+  picked up once unlocked.
   During resolution, a store that is missing, empty, or raises anything
   (Windows over SSH raises `pywintypes.error` 1312, not a `KeyringError`) is
   logged at DEBUG and skipped.
@@ -608,19 +611,29 @@ prompt, else an `authentication` error without any request.
   `--show-config` / `--setup` / `--forget-password`.
 - **Windows:** keyring's default persistence, "enterprise", roams with a
   roaming profile. The store uses a fresh `WinVaultKeyring` set to "local
-  machine", which leaves the process-wide backend alone.
+  machine", which leaves the process-wide backend alone. When several
+  backends are installed, keyring returns its chainer. The store unwraps it
+  and uses the first backend, where the chainer would write anyway.
 - **Injection:** `secrets=` on `ConnectionConfig.resolve_password`,
   `Backend.from_config`, `backend_from_config`, both clients and
   `run_setup`. The default is `default_secret_store()`; `None` means no
   store. A prompted password is saved only when `save_prompted` /
-  `save_prompted_password` (given the store's name) returns True. The CLI
-  asks, default no, and only when interactive.
+  `save_prompted_password` (given the store's name) returns True, and only
+  once the server has accepted it. `Backend.from_config` keeps it pending.
+  `_with_trust` writes it after the first response that is an answer or a
+  `session_relevance` error. An `authentication` error drops it, and any
+  other failure leaves it pending. Without this, a typo would be resent on
+  every run, and failed SaaS logins lock the account. There's no offer when
+  the store just failed to read. `resolve_password` itself never writes. The
+  CLI asks, default no, and only when interactive.
 - **Opt-in:** the wizard offers the store, defaulting to no, only when one
   exists. On yes it writes `password_store` and no `password`. If the store
-  write fails, it says so and saves the password in the file as before.
-  `--show-config` shows the store's name and never reads the store, since on
-  macOS a read can ask the user to allow access. `--forget-password NAME`
-  deletes the entry.
+  write fails, it says so and asks the file-or-env-var question it skipped,
+  rather than quietly writing the file. `--show-config` shows the store's
+  name and never reads a connection's password; at most it triggers the
+  one-time probe. A read can make macOS ask the user to allow access.
+  `--forget-password NAME` deletes the entry, or exits 1 when there is
+  none.
 - **Tests** never reach a real store: conftest pins the default to `None`
   and keyring to its `fail` backend. The real round trips are marked
   `real_secret_store` and run only with `BFRSR_REAL_SECRET_STORE=1`, under a

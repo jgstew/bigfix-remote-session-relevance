@@ -147,6 +147,15 @@ class ConnectionConfig:
     # Added by load_config, not written in the file: never saved or written back.
     auto_detected: bool = field(default=False, compare=False)
 
+    def __post_init__(self) -> None:
+        # The loader normalizes spellings; this catches one built in code,
+        # which would otherwise silently mean "no store".
+        if self.password_store is not None and self.password_store != PASSWORD_STORE_SYSTEM:
+            raise ConfigError(
+                f'{self.name}: password_store must be "{PASSWORD_STORE_SYSTEM}", '
+                f"not {self.password_store!r}"
+            )
+
     @property
     def address(self) -> ServerAddress:
         return normalize_server(self.server, self.backend)
@@ -169,23 +178,37 @@ class ConnectionConfig:
         *,
         prompt: Callable[[str], str] | None = None,
         secrets: SecretStore | None = DEFAULT_SECRET_STORE,
-        save_prompted: Callable[[str], bool] | None = None,
     ) -> str | None:
         """``password_env`` if set, else inline ``password``, else the store, else ``prompt``.
 
         The store is read only with ``password_store = "system"``: ``secrets``,
         by default `default_secret_store()`; None means none. A missing or
-        empty store, or any error from it, falls through to the prompt. A
-        prompted password is saved to the store only if ``save_prompted``
-        (called with the store's name) says so.
+        empty store, or any error from it, falls through to the prompt.
+        Nothing is ever written to the store here.
+        """
+        return self._resolve_password_and_store(prompt=prompt, secrets=secrets)[0]
+
+    def _resolve_password_and_store(
+        self,
+        *,
+        prompt: Callable[[str], str] | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+    ) -> tuple[str | None, SecretStore | None]:
+        """`resolve_password`, plus the store a prompted password could be saved in (for from_config).
+
+        The store comes back only when the password was typed at the prompt
+        and the store is usable (it answered, without an entry). Saving it
+        is the caller's choice, best made once the server has accepted it.
         """
         if self.password_env:
             value = os.environ.get(self.password_env)
             if value:
-                return value
+                return value, None
         if self.password is not None:
-            return self.password
-        store = self._secret_store(secrets)
+            return self.password, None
+        # Checked here, not only in _secret_store: the common no-store prompt
+        # path then pays for no extra call.
+        store = None if self.password_store is None else self._secret_store(secrets)
         if store is not None:
             try:
                 found = store.get(secret_stores.secret_account(self))
@@ -198,24 +221,15 @@ class ConnectionConfig:
                     store.name,
                     type(exc).__name__,
                 )
+                store = None  # nor offered for saving: it just failed
             else:
                 if found:
-                    return found
+                    return found, None
                 log.debug("%s: no password in %s; falling back", self.name, store.name)
         if prompt is None or self.username is None:
-            return None
+            return None, None
         answer = prompt(f"Password for {self.username} on {self.name}: ")
-        if answer and store is not None and save_prompted is not None and save_prompted(store.name):
-            try:
-                store.set(secret_stores.secret_account(self), answer)
-            except Exception as exc:  # noqa: BLE001 - the password still works
-                log.warning(
-                    "%s: could not save the password in %s: %s",
-                    self.name,
-                    store.name,
-                    type(exc).__name__,
-                )
-        return answer
+        return answer, store if answer else None
 
     def _secret_store(self, secrets_arg: SecretStore | None) -> SecretStore | None:
         if self.password_store != PASSWORD_STORE_SYSTEM:
@@ -726,8 +740,9 @@ def redacted_summary(
 ) -> list[dict[str, Any]]:
     """Rows for ``--show-config``: what is configured, never the secrets.
 
-    A ``password_store`` password shows the store's name; the store itself
-    is not read (on macOS a read can ask the user to allow access).
+    A ``password_store`` password shows the store's name. No password is
+    read from the store (on macOS a read can ask the user to allow access);
+    at most `default_secret_store()` makes its one-time probe.
     """
     rows: list[dict[str, Any]] = []
     for c in config.connections:
