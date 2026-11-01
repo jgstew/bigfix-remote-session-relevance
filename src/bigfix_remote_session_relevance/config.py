@@ -186,6 +186,17 @@ class ConnectionConfig:
         empty store, or any error from it, falls through to the prompt.
         Nothing is ever written to the store here.
         """
+        # The no-store paths inline: this runs for every backend built.
+        if self.password_env:
+            value = os.environ.get(self.password_env)
+            if value:
+                return value
+        if self.password is not None:
+            return self.password
+        if self.password_store is None:
+            if prompt is None or self.username is None:
+                return None
+            return prompt(f"Password for {self.username} on {self.name}: ")
         return self._resolve_password_and_store(prompt=prompt, secrets=secrets)[0]
 
     def _resolve_password_and_store(
