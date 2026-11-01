@@ -100,7 +100,16 @@ async def saas_sign_in(
         raise ValueError("give totp or prompt, not both")
     email = email.strip()
     totp_prompt = _answer(totp) if totp is not None else prompt
-    backend = new_saas_backend(host, email, password, totp_prompt=totp_prompt, transport=transport)
+    # Always a real sign-in, never a saved session: that would make a wrong
+    # password look right. The new session is saved, as any sign-in is.
+    backend = new_saas_backend(
+        host,
+        email,
+        password,
+        totp_prompt=totp_prompt,
+        transport=transport,
+        reuse_saved_session=False,
+    )
     if not email or not password:
         # Sent, an empty email or password would still count as a failed login.
         blank = ResultError(
@@ -127,6 +136,7 @@ def new_saas_backend(
     *,
     totp_prompt: Callable[[str], str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    reuse_saved_session: bool = True,
 ) -> SaasBackend:
     """A backend for signing in and probing, as the wizard and `saas_sign_in` use."""
     return SaasBackend(
@@ -139,6 +149,7 @@ def new_saas_backend(
         read_timeout=_READ_TIMEOUT,
         retries=0,
         transport=transport,
+        reuse_saved_session=reuse_saved_session,
     )
 
 

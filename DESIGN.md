@@ -140,8 +140,16 @@ the bigfix-saas MCP server, which makes the same choices).
   **v1, not v2:** v1 does not register a gateway session (v2 counts against a
   5-concurrent-session cap, and a v2 login here hung for 30 s).
 - Renewal: `/auth/v1/token/refresh` (no data) before `exp` (lifetime from
-  `exp - iat`, timed on the local clock) or after a 401, then one fresh login
-  if refresh fails. The refresh token appears to be single-use.
+  `exp - iat`, timed on the local clock, monotonic and wall) or after a 401,
+  then one fresh login if refresh fails. v1 refresh accepts an expired access
+  token.
+- Tokens **(confirmed, issue #29)**: the access token lasts its `exp - iat`
+  (1 h by default, set per tenant; never assume 3600). The refresh token is
+  **single-use**: a refresh returns a new pair, a spent token gets 401. Its
+  expiry is **fixed at 7 days from login**; refreshing does not move it. A
+  request sent with an expired access token can spend the refresh token
+  without returning a replacement. The access JWT carries the email as `eml`
+  (2026-11-01); both tokens are unsigned-readable JWTs with `iat`/`exp`.
 - **Lockout safety:** 100 failed logins lock the account for good, so a
   rejected login is cached and never sent again by that backend, or by any
   connection sharing its sign-in (`authentication` / `login_failed`). Known
@@ -205,6 +213,66 @@ the bigfix-saas MCP server, which makes the same choices).
   a caller building its own backends (bigfix-remote-client-relevance's Fast
   Query, one `SaasBackend` per target) gets the same one-login-per-account
   behaviour without importing from `backends.*`.
+- **Saved sessions (decision, 1.8.0, issue #29):** a session is saved across
+  runs, on by default, so an MFA account needs a TOTP code only when the
+  7-day refresh token runs out; BigFix SaaS has no API key or service
+  account, so this is the only way to run one unattended.
+  - *Where:* `SaasSessionStore` (`saas_sessions.py`). One entry per account,
+    keyed `saas-session:<api host:port>:<email lower-cased>` (the
+    `secret_account` form with its own prefix), holding `access_token`,
+    `refresh_token`, `access_exp` / `refresh_exp` (wall-clock epoch seconds on
+    this machine), `servers`, `stored_at`, `version = 1`. It goes as JSON in
+    the `SecretStore` (`secrets=`, default `default_secret_store()`), else, or
+    when the store refuses it (Windows documents a 2560-byte credential
+    blob limit, and the pair is about 1.6 KB of text today, so Windows may
+    well use the file; untested there), in
+    `.remote_session_saas_sessions.toml` in the data directory
+    (`$BFRSR_SAAS_SESSIONS` overrides) at 0600, written atomically like the
+    pin file, with a warning when it is group- or world-readable. Any
+    unreadable entry is no session. An entry whose access token's `eml` is
+    another email is ignored.
+  - *Expiries:* `access_exp` is now plus `exp - iat` of the response;
+    `refresh_exp` is now plus the refresh JWT's `exp` less the response's
+    `iat` (the service's "now"), so clock skew does not matter; without a
+    readable `exp`, 7 days from login, unchanged by a refresh.
+  - *First use* (no session in memory): an access token with more than
+    `EXPIRY_SLACK_S` left is adopted (cookies set on the API host with path
+    `/`, so the service's next Set-Cookie replaces them); else a refresh
+    token that has not expired is refreshed; else a login.
+  - *Renewal* runs by the wall clock as well as the monotonic one (which may
+    stop while a device sleeps), so no request leaves with an expired token;
+    the 401 renewal stays only as a backstop. Within 1 h of `refresh_exp` a
+    login comes first, for a new week; when that login answers
+    `totp_required` (MFA, no prompt; not counted toward the lockout) the
+    refresh still runs until the expiry.
+  - *Coordinated refresh:* under a `filelock` on `<sessions file>.lock`
+    (whichever store holds the tokens), taken in a thread with a 35 s
+    timeout, the entry is read again. A pair newer than this session's means
+    another process refreshed: it is adopted, or, if its access token has
+    expired too, refreshed. Otherwise the refresh is sent and the new pair
+    written back before the lock is released. A refresh rejected as spent
+    reads the store once more (a process that could not get the lock may
+    have won), then drops the entry only if it still holds the spent token,
+    then signs in. If the lock times out, the refresh goes ahead with a
+    warning. Every login and refresh writes the pair back under the lock.
+  - *Never:* a TOTP code is cached or replayed (single-use, and a wrong one
+    counts toward the lockout); a logout is sent (it would end the session
+    other processes use); a token reaches `repr`, logs, results or
+    `--show-config`.
+  - *MFA without a prompt* and no usable session: the login goes without a
+    code (safe, `totp_required` is not counted) and the `totp_required`
+    error says the saved session ran out and to sign in with `--setup` or any
+    interactive run.
+  - *Off:* `session_cache = false` per connection (saas only), or
+    `BFRSR_SESSION_CACHE=0` for the default store; `SaasBackend(...,
+    session_store=None)` in code. `--forget-session NAME` /
+    `forget_saas_session(conn)` deletes an entry.
+  - `saas_sign_in` (and so `--setup`) always sends the login, never adopting a
+    saved session (that would accept a wrong password), and saves the result,
+    so `--setup` once a week keeps an MFA account usable unattended.
+  - The entry is the account's, not the password's: unlike the in-memory
+    pool key, a connection with another password adopts it. The OS user who
+    can read the store can read the config file too.
 - **Sign-in for a front end (1.6.0, provisional):** `saas_sign_in(host, email,
   password, *, totp=None, prompt=None, pool=None)` is the wizard's sign-in
   without the wizard: it signs in (`SaasBackend.sign_in()`, no query) and
@@ -559,8 +627,8 @@ The data directory (`paths.data_dir()`) is `$BFRSR_HOME` (blank counts as
 unset, `~` expanded), else `~/.bigfix`, read on every call so an app can set
 it after importing. Every default path is built on it: the connections file,
 the pinned certificates, the local root server's deployment-id cache, and
-any file a later version adds (a persistent SaaS session store, say, or a
-keyring fallback), so one variable keeps covering them all. A specific
+the saved SaaS sessions file and its lock, and any file a later version
+adds, so one variable keeps covering them all. A specific
 override still wins: `--config` / `$BFRSR_CONFIG` for the connections file,
 a `KnownCerts(path)` for pins. Out of scope: `~/.besapi.conf`, besapi's own
 file, read from the real home.
@@ -713,8 +781,8 @@ Python classifiers equal to the versions CI tests.
 
 - **SaaS:** what the gateway does with no `sid` on an account with several
   servers (setup does not rely on it; only one-server accounts were seen
-  live). Logout on close is not sent (v1 sessions are not counted against
-  the cap).
+  live). Logout on close is never sent: v1 sessions are not counted against
+  the cap, and since 1.8.0 a saved session is shared with other processes.
 - Whether the second URL decode on the no-Explorer path (confirmed live:
   `%xx` only, not `+`) happens in the root server or in the Web Reports it
   forwards to. It does not change what the client must send.

@@ -321,7 +321,7 @@ class Backend(ABC):
             read_timeout=conn.read_timeout or 120.0,
             transport=transport,
             local_root_server=conn.credentials == local_root_server.LOCAL_ROOT_SERVER,
-            **cls._config_kwargs(conn, prompt),
+            **cls._config_kwargs(conn, prompt, secrets),
         )
         if (
             offer is not None
@@ -335,7 +335,10 @@ class Backend(ABC):
 
     @classmethod
     def _config_kwargs(
-        cls, conn: ConnectionConfig, prompt: Callable[[str], str] | None
+        cls,
+        conn: ConnectionConfig,
+        prompt: Callable[[str], str] | None,
+        secrets: SecretStore | None,
     ) -> dict[str, Any]:
         """Backend-specific constructor arguments taken from the config."""
         return {}

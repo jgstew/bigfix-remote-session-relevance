@@ -85,6 +85,37 @@ backend's default port are assumed.
 Passwords can live in the file, in environment variables named by
 `password_env`, or in this machine's OS password store.
 
+### Saved BigFix SaaS sessions
+
+A BigFix SaaS sign-in is saved and reused by later runs, so an account
+that uses MFA needs a TOTP code only about once a week: BigFix SaaS ends
+every session 7 days after its sign-in, and refreshing does not extend
+that. Run `--setup` (or any run from a terminal) when the code is needed
+again; a run with no one to type it fails with `totp_required` and says so.
+BigFix SaaS has no API key or service account, so this is the only way to
+run an MFA account unattended.
+
+- The session (the access and refresh tokens, never the password or a TOTP
+  code) is saved in this machine's password store when it has one (macOS
+  Keychain, Windows Credential Manager, the iOS Keychain, Linux Secret
+  Service with the `[keyring]` extra). Otherwise it goes in
+  `.remote_session_saas_sessions.toml` in `~/.bigfix` (or `$BFRSR_HOME`,
+  or the path in `$BFRSR_SAAS_SESSIONS`) as plaintext with mode 600, like a
+  password in the config file; on Windows that file inherits the folder's
+  permissions.
+- It belongs to the account (API host and email), so every connection of
+  that account shares it, and a run that has a session sends no password.
+- Turn it off for one connection with `session_cache = false`, or for
+  everything with `BFRSR_SESSION_CACHE=0`.
+- `--forget-session NAME` deletes a connection's saved session, so the next
+  run signs in again.
+- Tokens never appear in output, logs, results or `--show-config`, which
+  shows only `session_cache: on/off`.
+
+Processes using one account at the same time take turns renewing it, under
+a lock file beside the sessions file, so they never spend each other's
+single-use refresh token.
+
 ### Passwords in the OS password store
 
 ```toml
@@ -167,6 +198,7 @@ echo "number of bes fixlets" | bigfix-remote-session-relevance -
 bigfix-remote-session-relevance --show-config                   # connections, no secrets
 bigfix-remote-session-relevance --show-certs | --trust-cert NAME | --forget-cert HOST:PORT
 bigfix-remote-session-relevance --forget-password NAME          # delete it from the OS password store
+bigfix-remote-session-relevance --forget-session NAME           # delete a saved BigFix SaaS session
 ```
 
 Answers go to stdout; errors and `-v` metadata go to stderr.
@@ -211,7 +243,7 @@ it actually collapses something.
 | Exit code | Meaning |
 |---|---|
 | 0 | every queried deployment answered |
-| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` found no store or no entry, or the store failed |
+| 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` found no store or no entry, or the store failed, `--forget-session` found no saved session |
 | 2 | nothing reachable, or credentials rejected everywhere; `--discover-deployments` found no id |
 | 3 | partial: some deployments failed |
 | 64 | usage or configuration error, or no connection matched `--connection` / `--backend` |
@@ -414,6 +446,15 @@ login, or two when the account needs MFA and you pass `totp="123456"` (or a
 `error.code == "totp_required"`, so ask for the code and call again. A
 rejected sign-in is returned, never retried: failed logins count toward a
 permanent account lock.
+It always sends the login, even when a session is saved, so a wrong
+password never looks right, and saves the new session for later runs.
+
+Saved sessions (see [Saved BigFix SaaS sessions](#saved-bigfix-saas-sessions))
+use the `secrets=` store an app passes to `AsyncSessionRelevanceClient` or
+`backend_from_config`, else `default_secret_store()`, and the file when there
+is none. `SaasBackend(..., session_store=None)` turns them off for one
+backend, `SaasSessionStore(path, secrets=...)` puts them somewhere else, and
+`forget_saas_session(conn)` is `--forget-session`.
 
 ```python
 import dataclasses
@@ -467,7 +508,9 @@ Removing or changing any of these needs a new major version:
 `client_query_max_targets`, (since 1.6.0) `saas_sign_in` and
 `SaasAccount`, and (since 1.7.0) the password store names `SecretStore`,
 `MemorySecretStore`, `KeyringSecretStore`, `KeychainSecretStore`,
-`default_secret_store` and `secret_account`, are public and usable, but may change in a minor release
+`default_secret_store` and `secret_account`, and (since 1.8.0) the saved
+SaaS session names `SaasSessionStore`, `SavedSaasSession`,
+`default_saas_sessions_path` and `forget_saas_session`, are public and usable, but may change in a minor release
 (noted in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

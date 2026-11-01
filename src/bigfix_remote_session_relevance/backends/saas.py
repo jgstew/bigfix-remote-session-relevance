@@ -23,6 +23,11 @@ bigfix-saas MCP server, which pins the same choices):
 * 100 failed logins lock the account for good, so a rejected login is never
   sent again. The only second attempt is the server's own ``totp_required``
   challenge, answered through ``totp_prompt``.
+* Sessions are saved across runs (`SaasSessionStore`, saas_sessions.py), so
+  an MFA account needs a TOTP code only when the 7-day refresh token runs
+  out. The refresh token is single-use and a request sent with an expired
+  access token can spend it, so a session is renewed by the wall clock before
+  ``exp``, under a file lock shared with other processes; never logged out.
 * Backends of one account (API host + email + password) attached to the same
   `SaasSessionPool` share one `SaasSession`: one login, one cached failure and
   one refresh for all of them. ``--setup`` saves one connection per ``sid``,
@@ -61,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 import time
 import uuid
@@ -71,6 +77,14 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from ..result import ResultError, SessionRelevanceResult
+from ..saas_sessions import (
+    REFRESH_LIFETIME_S,
+    SaasSessionStore,
+    SavedSaasSession,
+    default_saas_session_store,
+    jwt_claims,
+)
+from ..secrets import DEFAULT_SECRET_STORE
 from ..server_address import saas_api_address
 from ..value_types import loads_json
 from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
@@ -89,7 +103,12 @@ from .client_query import (
 _SID_KEY = re.compile(r"[0-9A-Za-z_-]+")
 
 if TYPE_CHECKING:
+    from filelock import FileLock
+
     from ..config import ConnectionConfig
+    from ..secrets import SecretStore
+
+log = logging.getLogger(__name__)
 
 LOGIN_PATH = "/auth/v1/user/login"
 REFRESH_PATH = "/auth/v1/token/refresh"
@@ -100,6 +119,18 @@ CLIENT_QUERY_RESULTS_PATH = "/bfproxy/v1/clientquery/listresults"
 CLIENT_QUERY_PAGE = 1000
 # Renew this long before the session's expiry rather than racing it.
 EXPIRY_SLACK_S = 30.0
+# Within this long of the refresh token's fixed expiry, sign in for a new week
+# rather than refresh (a refresh cannot extend it).
+REFRESH_MARGIN_S = 3600.0
+# How long to wait for another process's refresh before refreshing anyway.
+LOCK_TIMEOUT_S = 35.0
+# The ``session_store`` default: `default_saas_session_store()`.
+DEFAULT_SESSION_STORE: Any = object()
+_TOTP_NO_SESSION = (
+    "this account requires a TOTP code (MFA) and has no usable saved session; sign in"
+    " interactively (--setup, or any run from a terminal) to enter one, and the session"
+    " is then saved for up to 7 days"
+)
 
 _LOGIN_SIGNAL_MESSAGES = {
     "totp_required": "this account requires a TOTP code (MFA); run interactively to enter it",
@@ -136,12 +167,17 @@ class SaasSession:
         self.servers: tuple[str, ...] = ()
         self.generation = 0
         self.lock = asyncio.Lock()
+        # Wall-clock expiries (epoch seconds) of the access token and of the
+        # refresh token. The monotonic clock may stop while a device sleeps.
+        self.expires_at: float | None = None
+        self.refresh_exp: float | None = None
 
     def fresh(self) -> bool:
         return (
             self.failure is None
             and self.until is not None
             and time.monotonic() < self.until - EXPIRY_SLACK_S
+            and (self.expires_at is None or time.time() < self.expires_at - EXPIRY_SLACK_S)
         )
 
 
@@ -173,12 +209,25 @@ class SaasBackend(Backend):
         *,
         sid: str | None = None,
         totp_prompt: Callable[[str], str] | None = None,
+        session_store: SaasSessionStore | None = DEFAULT_SESSION_STORE,
+        reuse_saved_session: bool = True,
         **kwargs: Any,
     ) -> None:
+        """``session_store``: where sessions are saved across runs (default
+        `default_saas_session_store()`, off with ``BFRSR_SESSION_CACHE=0``;
+        None for none). ``reuse_saved_session=False`` signs in rather than
+        adopt a saved session (to check a password), and still saves the new one.
+        """
         super().__init__(server, **kwargs)
         self.address = saas_api_address(self.address)
         self.sid = sid
         self._totp_prompt = totp_prompt
+        self._store: SaasSessionStore | None = (
+            default_saas_session_store()
+            if session_store is DEFAULT_SESSION_STORE
+            else session_store
+        )
+        self._reuse_saved = reuse_saved_session
         self._session = SaasSession()  # private unless a SaasSessionPool attaches it
         self._synced: tuple[httpx.AsyncClient, int] | None = None
 
@@ -195,9 +244,13 @@ class SaasBackend(Backend):
 
     @classmethod
     def _config_kwargs(
-        cls, conn: ConnectionConfig, prompt: Callable[[str], str] | None
+        cls,
+        conn: ConnectionConfig,
+        prompt: Callable[[str], str] | None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
     ) -> dict[str, Any]:
-        return {"sid": conn.sid, "totp_prompt": prompt}
+        store = default_saas_session_store(secrets) if conn.session_cache else None
+        return {"sid": conn.sid, "totp_prompt": prompt, "session_store": store}
 
     # Credentials travel in the login body; the session in cookies.
     def _basic_auth(self) -> httpx.BasicAuth | None:
@@ -372,6 +425,13 @@ class SaasBackend(Backend):
             if session.failure is not None:
                 return session.failure
             if session.until is None:
+                saved = await self._load_saved() if self._reuse_saved else None
+                if saved is not None and saved.access_remaining() > EXPIRY_SLACK_S:
+                    self._adopt(client, saved)
+                    return None
+                if saved is not None and saved.refresh_remaining() > 0:
+                    self._adopt(client, saved)
+                    return await self._refresh(client)
                 return await self._login(client)
             if session.fresh():
                 return None
@@ -391,14 +451,76 @@ class SaasBackend(Backend):
         """Refresh the cookies; if that fails, sign in again. Holds the lock.
 
         A fresh login is safe here: it only happens after an earlier login
-        with these credentials succeeded, so it cannot add to a failure count.
+        with these credentials succeeded (or a saved session showed the
+        account signed in), so it adds at most one failure per run.
+
+        Near the refresh token's fixed expiry a login comes first, for a new
+        week. Without a TOTP prompt an MFA account answers it
+        ``totp_required``, which does not count toward the lockout, and the
+        refresh still works until the expiry.
         """
+        session = self._session
+        if (
+            session.refresh_exp is not None
+            and session.refresh_exp - time.time() <= REFRESH_MARGIN_S
+        ):
+            problem = await self._login(client)
+            if problem is None or not (
+                problem.code == "totp_required" and session.refresh_exp > time.time()
+            ):
+                return problem
+            session.failure = None
+        if self._store is not None:
+            renewed = await self._coordinated_refresh(client, self._store)
+        else:
+            renewed = await self._post_refresh(client)
+        if renewed:
+            return None
+        session.until = None
+        return await self._login(client)
+
+    async def _post_refresh(self, client: httpx.AsyncClient) -> bool:
         self._sync_cookies(client)
         response = await self._post(client, REFRESH_PATH, None)
-        if response.status_code == 200 and self._accept_session(client, response):
-            return None
-        self._session.until = None
-        return await self._login(client)
+        return response.status_code == 200 and self._accept_session(client, response)
+
+    async def _coordinated_refresh(
+        self, client: httpx.AsyncClient, store: SaasSessionStore
+    ) -> bool:
+        """Refresh under the store's file lock, so processes never spend one token twice.
+
+        Under the lock the saved pair is read first: one newer than this
+        session's means another process already refreshed, and is adopted
+        (or refreshed, if its access token has expired too). A refresh
+        rejected as spent reads the store again for the same reason, and
+        only then drops the entry, if it still holds the spent token.
+        """
+        lock = await self._lock(store)
+        try:
+            for attempt in range(2):  # this session's token, then a newer saved one
+                sent = _cookie(self._session.cookies, "refreshToken")
+                saved = await self._store_call(store.load, self.address, self.username or "")
+                if saved is not None and saved.refresh_token != sent:
+                    if saved.access_remaining() > EXPIRY_SLACK_S:
+                        self._adopt(client, saved)
+                        return True
+                    if saved.refresh_remaining() <= 0:
+                        return False
+                    self._adopt(client, saved)
+                    sent = saved.refresh_token
+                elif attempt:
+                    return False  # nothing newer: the token is spent
+                if await self._post_refresh(client):
+                    await self._save(store)
+                    return True
+                if sent is not None:
+                    await self._store_call(
+                        store.forget, self.address, self.username or "", refresh_token=sent
+                    )
+            return False
+        finally:
+            if lock is not None:
+                lock.release()
 
     async def _login(
         self, client: httpx.AsyncClient, totp: str | None = None
@@ -408,7 +530,14 @@ class SaasBackend(Backend):
         if totp is not None:
             data["totp"] = totp
         response = await self._post(client, LOGIN_PATH, data)
-        if response.status_code == 200 and self._accept_session(client, response):
+        if response.status_code == 200 and self._accept_session(client, response, login=True):
+            if self._store is not None:
+                lock = await self._lock(self._store)
+                try:
+                    await self._save(self._store)
+                finally:
+                    if lock is not None:
+                        lock.release()
             return None
         signal = _error_message(response)
         if (
@@ -423,12 +552,15 @@ class SaasBackend(Backend):
         if response.status_code >= 500:
             return error_from_status(response, self.name)  # transient: may retry later
         known = signal in _LOGIN_SIGNAL_MESSAGES
+        message = _LOGIN_SIGNAL_MESSAGES[signal] if known and signal else "credentials rejected"
+        if signal == "totp_required" and self._store is not None:
+            message = _TOTP_NO_SESSION
         error = ResultError(
             kind="authentication",
             code=signal if known else "login_failed",
             backend=self.name,
             http_status=response.status_code,
-            message=_LOGIN_SIGNAL_MESSAGES[signal] if known and signal else "credentials rejected",
+            message=message,
             detail=signal,
         )
         # Never POST these credentials again, from this backend or any other
@@ -436,7 +568,9 @@ class SaasBackend(Backend):
         self._session.failure = error
         return error
 
-    def _accept_session(self, client: httpx.AsyncClient, response: httpx.Response) -> bool:
+    def _accept_session(
+        self, client: httpx.AsyncClient, response: httpx.Response, *, login: bool = False
+    ) -> bool:
         try:
             body = response.json()
         except ValueError:
@@ -450,6 +584,14 @@ class SaasBackend(Backend):
         lifetime = float(exp - iat) if isinstance(iat, int) and isinstance(exp, int) else 3600.0
         session = self._session
         session.until = time.monotonic() + max(lifetime, 0.0)
+        now = time.time()
+        session.expires_at = now + max(lifetime, 0.0)
+        session.refresh_exp = _refresh_expiry(
+            _cookie(client.cookies, "refreshToken"),
+            iat if isinstance(iat, int) else None,
+            now,
+            None if login else session.refresh_exp,
+        )
         pids = data.get("pids")
         if isinstance(pids, dict) and isinstance(pids.get("bf"), dict):
             # A sid is shown by --setup and becomes part of a connection name.
@@ -458,6 +600,93 @@ class SaasBackend(Backend):
         session.generation += 1
         self._synced = (client, session.generation)
         return True
+
+    # -- saved sessions ---------------------------------------------------------------
+
+    async def _store_call(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """A store operation in a thread (file and Keychain I/O); None if it failed."""
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 - a store failure costs at most a sign-in
+            log.debug(
+                "%s: saved SaaS session: %s", self.connection or self.name, type(exc).__name__
+            )
+            return None
+
+    async def _load_saved(self) -> SavedSaasSession | None:
+        if self._store is None:
+            return None
+        found: SavedSaasSession | None = await self._store_call(
+            self._store.load, self.address, self.username or ""
+        )
+        return found
+
+    async def _save(self, store: SaasSessionStore) -> None:
+        """Save this session's tokens. The caller holds the store's lock."""
+        session, cookies = self._session, self._session.cookies
+        access, refresh = _cookie(cookies, "accessToken"), _cookie(cookies, "refreshToken")
+        if not access or not refresh or session.expires_at is None or session.refresh_exp is None:
+            return
+        saved = SavedSaasSession(
+            access_token=access,
+            refresh_token=refresh,
+            access_exp=session.expires_at,
+            refresh_exp=session.refresh_exp,
+            servers=session.servers,
+            stored_at=time.time(),
+        )
+        await self._store_call(store.save, self.address, self.username or "", saved)
+
+    def _adopt(self, client: httpx.AsyncClient, saved: SavedSaasSession) -> None:
+        """Use a saved session: its cookies, its expiries, its servers."""
+        session = self._session
+        jar = httpx.Cookies()
+        # On the API host with path "/", as the service sets them, so a later
+        # Set-Cookie replaces these rather than adding a second of each name.
+        jar.set("accessToken", saved.access_token, domain=self.address.host, path="/")
+        jar.set("refreshToken", saved.refresh_token, domain=self.address.host, path="/")
+        session.cookies = jar
+        session.until = time.monotonic() + max(saved.access_remaining(), 0.0)
+        session.expires_at = saved.access_exp
+        session.refresh_exp = saved.refresh_exp
+        if saved.servers:
+            session.servers = saved.servers
+        session.generation += 1
+        self._sync_cookies(client)
+
+    async def _lock(self, store: SaasSessionStore) -> FileLock | None:
+        """The store's file lock, held; None if it could not be had in time.
+
+        Without it the refresh goes ahead anyway: a spent token's 401 then
+        reads the store again, so the worst case is one sign-in.
+        """
+        from filelock import Timeout
+
+        try:
+            lock = await asyncio.to_thread(store.lock)
+        except OSError as exc:
+            log.debug("%s: no SaaS session lock: %s", self.connection or self.name, exc)
+            return None
+        acquiring = asyncio.ensure_future(asyncio.to_thread(lock.acquire, timeout=LOCK_TIMEOUT_S))
+        try:
+            await asyncio.shield(acquiring)
+        except asyncio.CancelledError:
+            # The thread may still get the lock after we stop waiting: let it go then.
+            acquiring.add_done_callback(
+                lambda f: lock.release() if not f.cancelled() and f.exception() is None else None
+            )
+            raise
+        except Timeout:
+            log.warning(
+                "%s: another process held the BigFix SaaS session lock for %.0f s; going ahead",
+                self.connection or self.name,
+                LOCK_TIMEOUT_S,
+            )
+            return None
+        except OSError as exc:
+            log.debug("%s: no SaaS session lock: %s", self.connection or self.name, exc)
+            return None
+        return lock
 
     async def _post(
         self,
@@ -475,6 +704,33 @@ class SaasBackend(Backend):
         if sid is not None:
             envelope["sid"] = sid
         return await client.post(path, json=envelope)
+
+
+def _cookie(cookies: httpx.Cookies, name: str) -> str | None:
+    """The cookie's value, the last set if several (``Cookies.get`` raises then)."""
+    found = None
+    for cookie in cookies.jar:
+        if cookie.name == name:
+            found = cookie.value
+    return found
+
+
+def _refresh_expiry(
+    refresh_token: str | None, iat: int | None, now: float, previous: float | None
+) -> float:
+    """When the refresh token expires, on this machine's clock (epoch seconds).
+
+    From the token's own ``exp``, less the response's ``iat`` (the service's
+    "now"), so clock skew does not matter. Without it: unchanged by a refresh,
+    7 days from a login.
+    """
+    claims = jwt_claims(refresh_token) if refresh_token else None
+    exp = claims.get("exp") if claims else None
+    if isinstance(exp, int) and not isinstance(exp, bool):
+        return now + (exp - (iat if iat is not None else now))
+    if previous is not None:
+        return previous
+    return now + REFRESH_LIFETIME_S
 
 
 def _client_query_data(

@@ -144,6 +144,8 @@ PUBLIC_NAMES = [
     "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
+    "SaasSessionStore",
+    "SavedSaasSession",
     "SecretStore",
     "ServerAddress",
     "SessionRelevanceClient",
@@ -162,10 +164,12 @@ PUBLIC_NAMES = [
     "client_query_max_targets",
     "data_dir",
     "default_config_path",
+    "default_saas_sessions_path",
     "default_secret_store",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
+    "forget_saas_session",
     "load_config",
     "run_setup",
     "saas_sign_in",
@@ -213,6 +217,11 @@ PROVISIONAL = {
     "SecretStore",
     "default_secret_store",
     "secret_account",
+    # 1.8.0: SaaS sessions saved across runs (issue #29).
+    "SaasSessionStore",
+    "SavedSaasSession",
+    "default_saas_sessions_path",
+    "forget_saas_session",
 }
 
 

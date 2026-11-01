@@ -45,6 +45,12 @@ from .paths import data_dir
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .saas_account import SaasAccount, saas_sign_in
+from .saas_sessions import (
+    SaasSessionStore,
+    SavedSaasSession,
+    default_saas_sessions_path,
+    forget_saas_session,
+)
 from .secrets import (
     KeychainSecretStore,
     KeyringSecretStore,
@@ -108,6 +114,8 @@ __all__ = [
     "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
+    "SaasSessionStore",
+    "SavedSaasSession",
     "SecretStore",
     "ServerAddress",
     "SessionRelevanceClient",
@@ -126,10 +134,12 @@ __all__ = [
     "client_query_max_targets",
     "data_dir",
     "default_config_path",
+    "default_saas_sessions_path",
     "default_secret_store",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
+    "forget_saas_session",
     "load_config",
     "run_setup",
     "saas_sign_in",
