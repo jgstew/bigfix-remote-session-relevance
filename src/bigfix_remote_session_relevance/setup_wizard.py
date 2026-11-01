@@ -14,6 +14,7 @@ can reach.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import getpass
 import ipaddress
@@ -30,7 +31,13 @@ from .backends.base import Backend, TrustPolicy
 from .backends.registry import BACKEND_CLASSES
 from .backends.rest import RestBackend
 from .backends.saas import SaasSessionPool
-from .config import ConnectionConfig, load_config, resolve_config_path, save_connection
+from .config import (
+    PASSWORD_STORE_SYSTEM,
+    ConnectionConfig,
+    load_config,
+    resolve_config_path,
+    save_connection,
+)
 from .deployment import (
     DEPLOYMENT_ID_SESSION_RELEVANCE,
     deployment_id_from_hashes,
@@ -41,6 +48,7 @@ from .exceptions import ConfigError
 from .render import EXIT_NOTHING_REACHABLE, EXIT_USAGE
 from .result import ResultError
 from .saas_account import new_saas_backend, saas_connection_name, saas_sign_in
+from .secrets import DEFAULT_SECRET_STORE, SecretStore, default_secret_store, secret_account
 from .server_address import (
     DEFAULT_PORTS,
     ServerAddress,
@@ -268,12 +276,15 @@ def run_setup(
     getpass_fn: InputFn = getpass.getpass,
     probe_fn: ProbeFn | None = None,
     saas_probe_fn: SaasProbeFn | None = None,
+    secrets: SecretStore | None = DEFAULT_SECRET_STORE,
 ) -> int:
     """Interactively probe a server and save its connections; the exit code.
 
     ``path=None`` is the config ``--setup`` would use. ``backends`` limits
     which backends are probed and offered for saving, e.g. ``("rest",)``
-    for a caller that needs only the REST API.
+    for a caller that needs only the REST API. ``secrets``: the OS password
+    store offered instead of the file (default `default_secret_store()`;
+    None: never offered).
     """
     if isinstance(backends, str):
         raise TypeError(f"backends must be a collection of names, e.g. ({backends!r},)")
@@ -367,20 +378,13 @@ def run_setup(
             say("Nothing answered; check the host, firewall and ports.")
         return EXIT_NOTHING_REACHABLE
 
-    store = (
-        input_fn(
-            "Store the password in the config file (mode 0600) [f], or read it from an "
-            "environment variable [e]? [F/e] "
-        )
-        .strip()
-        .lower()
-    )
-    password_env: str | None = None
-    if store.startswith("e"):
-        bare = split_server(host)[1].upper()
-        default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', bare).strip('_')}_PASSWORD"
-        password_env = input_fn(f"Environment variable name [{default_env}]: ").strip()
-        password_env = password_env or default_env
+    # Opt-in, default no: the file is what every OS can read, so a config
+    # shared between machines keeps working (issue #32).
+    secret_store = default_secret_store() if secrets is DEFAULT_SECRET_STORE else secrets
+    use_store = secret_store is not None and input_fn(
+        f"Save the password in {secret_store.name} instead of the config file? [y/N] "
+    ).strip().lower() in ("y", "yes")
+    password_env = None if use_store else _ask_file_or_env(host, input_fn)
 
     try:
         existing = {c.name for c in load_config(path).connections} if path.is_file() else set()
@@ -389,6 +393,7 @@ def run_setup(
         return EXIT_USAGE
 
     saved: list[str] = []
+    stored: list[str] = []  # their password went to the OS store
     for r in saveable:
         flag = " (credentials were rejected)" if r.status == "auth" else ""
         if input_fn(f"Save {r.backend} at {_where(r)}{flag}? [Y/n] ").strip().lower() not in (
@@ -420,17 +425,55 @@ def run_setup(
             sid=r.sid,
             verify=True if r.backend == "saas" else None,
         )
+        if use_store and secret_store is not None:
+            # dataclasses.replace: the local `replace` is the "replace it?" answer.
+            in_store = dataclasses.replace(
+                conn, password=None, password_store=PASSWORD_STORE_SYSTEM
+            )
+            try:
+                secret_store.set(secret_account(in_store), password)
+            except Exception as exc:  # noqa: BLE001 - any store failure: ask, as without one
+                # The user chose not to have it in the file: ask again rather
+                # than write it there quietly. The answer covers the rest too.
+                say(f"could not save the password in {secret_store.name} ({type(exc).__name__})")
+                use_store = False
+                password_env = _ask_file_or_env(host, input_fn)
+                conn = dataclasses.replace(
+                    conn, password=None if password_env else password, password_env=password_env
+                )
+            else:
+                conn = in_store
+                stored.append(name)
         save_connection(path, conn, replace=replace)
         existing.add(name)
         saved.append(name)
 
     if saved:
         say(f"Saved {', '.join(saved)} to {path}")
+        if stored and secret_store is not None:
+            say(f"The password for {', '.join(stored)} is in {secret_store.name}.")
         if password_env:
             say(f"Set the password before running queries, e.g.: export {password_env}=...")
     else:
         say("Nothing saved.")
     return 0
+
+
+def _ask_file_or_env(host: str, input_fn: InputFn) -> str | None:
+    """The ``password_env`` name to use, or None to keep the password in the file."""
+    answer = (
+        input_fn(
+            "Store the password in the config file (mode 0600) [f], or read it from an "
+            "environment variable [e]? [F/e] "
+        )
+        .strip()
+        .lower()
+    )
+    if not answer.startswith("e"):
+        return None
+    bare = split_server(host)[1].upper()
+    default_env = f"BFRSR_{re.sub(r'[^A-Z0-9]+', '_', bare).strip('_')}_PASSWORD"
+    return input_fn(f"Environment variable name [{default_env}]: ").strip() or default_env
 
 
 def _config_server(backend: str, address: ServerAddress) -> str:

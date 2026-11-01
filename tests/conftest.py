@@ -56,7 +56,12 @@ def _live_backends() -> set[str]:
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     live_backends: set[str] | None = None
     have_openssl = shutil.which("openssl") is not None
+    real_secret_store = os.environ.get("BFRSR_REAL_SECRET_STORE") == "1"
     for item in items:
+        if "real_secret_store" in item.keywords and not real_secret_store:
+            item.add_marker(
+                pytest.mark.skip(reason="real OS password store: set BFRSR_REAL_SECRET_STORE=1")
+            )
         if "tls_local" in item.keywords and not have_openssl:
             item.add_marker(pytest.mark.skip(reason="openssl CLI not found"))
         for marker, backend in _LIVE_MARKERS.items():
@@ -74,14 +79,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
-def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _isolated_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> Path:
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    if request.node.get_closest_marker("real_secret_store"):
+        # A changed HOME makes macOS Security.framework show a "keychain not
+        # found" GUI dialog, and the test hangs. ~/.bigfix is still redirected.
+        monkeypatch.setenv("BFRSR_HOME", str(home / ".bigfix"))
+    else:
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.delenv("BFRSR_HOME", raising=False)
     for var in (
         "BFRSR_CONFIG",
-        "BFRSR_HOME",
         "BFRSR_LOCAL_ROOT_SERVER",
         "BES_ROOT_SERVER",
         "BES_USER_NAME",
@@ -97,6 +109,13 @@ def _isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         local_root_server, "CREDENTIALS_FILE", tmp_path / "no-root-server" / "creds"
     )
     monkeypatch.setattr(local_root_server, "CRYPTO_UTILITY", tmp_path / "no-root-server" / "crypto")
+    # Never read or write the developer's real Keychain / Credential Manager:
+    # the default store is "none here" unless a test injects one. keyring
+    # itself, if anything reaches it, gets its always-failing backend.
+    from bigfix_remote_session_relevance import secrets
+
+    monkeypatch.setattr(secrets, "_default_store", None)
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
     return home
 
 

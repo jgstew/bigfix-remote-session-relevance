@@ -57,6 +57,16 @@ jobs:
       - name: Test
         run: uv run pytest -q -rs
 
+      # Round trips through the runner's own Credential Manager / Keychain
+      # (issue #32): hosted runners are throwaway, and each test uses a unique
+      # service it deletes. The timeout catches a keychain GUI prompt.
+      - name: Test the real OS password store
+        if: runner.os != 'Linux'
+        timeout-minutes: 5
+        env:
+          BFRSR_REAL_SECRET_STORE: "1"
+        run: uv run pytest -q -rs -n0 -m real_secret_store tests/unit/test_secrets.py
+
   # Every dependency is pure Python today, so the package installs on iOS and
   # Android (the iOS app embeds python.org's framework). This keeps a new
   # dependency without wheels there from slipping in unnoticed.
@@ -72,24 +82,47 @@ jobs:
 
       # --only-binary: a mobile app cannot build an sdist, so every package
       # must have a wheel for the platform (or be pure Python).
-      - name: iOS and Android resolve from wheels only
+      # keyring is absent there: it has no iOS or Android backend (iOS uses
+      # secrets.KeychainSecretStore; issue #32).
+      - name: iOS and Android resolve from wheels only, without keyring
         run: |
           set -euo pipefail
           for plat in arm64-apple-ios arm64-apple-ios-simulator aarch64-linux-android; do
             for py in 3.13 3.15; do
               echo "== $plat / $py"
-              uv pip compile pyproject.toml --quiet --no-header \
-                --python-version "$py" --python-platform "$plat" --only-binary :all:
+              out=$(uv pip compile pyproject.toml --quiet --no-header \
+                --python-version "$py" --python-platform "$plat" --only-binary :all:)
+              echo "$out"
+              if grep -q '^keyring==' <<<"$out"; then
+                echo "keyring must not be installed on $plat" >&2
+                exit 1
+              fi
             done
           done
 
       # The same command on desktop, so a failure above is the platform's,
       # not a broken pyproject.toml or uv.
-      - name: Desktop still resolves
+      # keyring (the OS password store) comes with macOS and Windows; Linux
+      # gets it only through the [keyring] extra (compiled cryptography).
+      - name: Desktop still resolves, keyring on macOS and Windows only
         run: |
           set -euo pipefail
-          for plat in aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
-            echo "== $plat"
+          compile() {
             uv pip compile pyproject.toml --quiet --no-header --python-version 3.11 \
-              --python-platform "$plat" --only-binary :all: | grep '^httpx=='
+              --python-platform "$1" --only-binary :all: "${@:2}"
+          }
+          for plat in aarch64-apple-darwin x86_64-pc-windows-msvc; do
+            echo "== $plat"
+            out=$(compile "$plat")
+            grep '^httpx==' <<<"$out"
+            grep '^keyring==' <<<"$out"
           done
+          echo "== x86_64-unknown-linux-gnu"
+          out=$(compile x86_64-unknown-linux-gnu)
+          grep '^httpx==' <<<"$out"
+          if grep -q '^keyring==' <<<"$out"; then
+            echo "keyring must be opt-in on Linux" >&2
+            exit 1
+          fi
+          echo "== x86_64-unknown-linux-gnu [keyring]"
+          compile x86_64-unknown-linux-gnu --extra keyring | grep '^keyring=='

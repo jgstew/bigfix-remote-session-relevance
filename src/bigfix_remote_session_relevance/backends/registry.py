@@ -7,6 +7,7 @@ from collections.abc import Callable
 import httpx
 
 from ..config import ConnectionConfig
+from ..secrets import DEFAULT_SECRET_STORE, SecretStore
 from .base import Backend, TrustPolicy
 from .explorer import ExplorerBackend
 from .rest import RestBackend
@@ -27,6 +28,8 @@ def backend_from_config(
     trust: TrustPolicy | None = None,
     prompt: Callable[[str], str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+    save_prompted: Callable[[str], bool] | None = None,
 ) -> Backend:
     """The backend a configured connection names, built from its settings.
 
@@ -35,5 +38,10 @@ def backend_from_config(
     `client_query_max_targets()` for how many computers one query may target.
     """
     return BACKEND_CLASSES[conn.backend].from_config(
-        conn, trust=trust, prompt=prompt, transport=transport
+        conn,
+        trust=trust,
+        prompt=prompt,
+        transport=transport,
+        secrets=secrets,
+        save_prompted=save_prompted,
     )

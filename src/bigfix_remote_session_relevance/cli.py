@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterable
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any, NoReturn, TextIO
 
+from . import secrets
 from .backends.explorer_extras import explorer_body
 from .client import TransportFactory
 from .config import Config, load_config, redacted_summary, resolve_config_path
@@ -86,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--trust-cert", metavar="NAME|HOST:PORT", help="fetch and (re)pin a server certificate"
     )
     setup.add_argument("--forget-cert", metavar="HOST:PORT", help="remove a pinned certificate")
+    setup.add_argument(
+        "--forget-password",
+        metavar="NAME",
+        help="delete a connection's password from this machine's OS password store",
+    )
 
     sel = p.add_argument_group("selection")
     sel.add_argument(
@@ -171,6 +177,8 @@ def main(
             return _trust_cert(args.trust_cert, config, ask)
         if args.show_config:
             return _show_config(config)
+        if args.forget_password:
+            return _forget_password(config, args.forget_password)
         if not config.connections:
             return _no_connections(args, is_interactive, ask, secret)
         config = _apply_timeouts(config, args)
@@ -191,6 +199,10 @@ def main(
             "backends": args.backend,
             "trust": trust,
             "prompt": secret_held if is_interactive else None,
+            # password_store = "system": offer to keep a typed password there.
+            "save_prompted_password": (lambda store: _offer_save(store, ask_held))
+            if is_interactive
+            else None,
             "transport_factory": transport_factory,
         }
         if args.discover_deployments:
@@ -379,6 +391,30 @@ def _prompt_trust(info: CertInfo, ask: InputFn) -> bool:
         "Compare it with the server's certificate before trusting it.\n"
     )
     return ask("Trust and pin this certificate? [y/N] ").strip().lower() in ("y", "yes")
+
+
+def _offer_save(store_name: str, ask: InputFn) -> bool:
+    answer = ask(f"Save this password in {store_name} for next time? [y/N] ")
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _forget_password(config: Config, name: str) -> int:
+    conn = config.connection(name)
+    store = secrets.default_secret_store()
+    if store is None:
+        print("no OS password store on this machine", file=sys.stderr)
+        return 1
+    account = secrets.secret_account(conn)
+    try:
+        if store.get(account) is None:
+            print(f"no password for {name} in {store.name}", file=sys.stderr)
+            return 1
+        store.delete(account)
+    except Exception as exc:  # noqa: BLE001 - any store failure, reported plainly
+        print(f"could not delete the password from {store.name}: {exc}", file=sys.stderr)
+        return 1
+    print(f"forgot the password for {name} in {store.name}")
+    return 0
 
 
 def _show_config(config: Config) -> int:

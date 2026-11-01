@@ -10,8 +10,10 @@ from typing import Any
 import httpx
 import pytest
 
+from bigfix_remote_session_relevance import secrets
 from bigfix_remote_session_relevance.config import load_config
 from bigfix_remote_session_relevance.render import EXIT_USAGE
+from bigfix_remote_session_relevance.secrets import MemorySecretStore, secret_account
 from bigfix_remote_session_relevance.setup_wizard import (
     ProbeResult,
     candidates,
@@ -1025,3 +1027,153 @@ def test_setup_keeps_default_names_unique_within_a_run(tmp_path: Path) -> None:
     )
     saved = {c.name: c.server for c in load_config(path).connections}
     assert saved == {"bigfix-explorer": "bigfix.example.com", "bigfix-explorer-2": "bigfix"}
+
+
+# -- the OS password store (issue #32) ------------------------------------------------------
+
+STORE_QUESTION = "Save the password in memory instead of the config file? [y/N] "
+
+
+def test_setup_store_question_defaults_to_no(tmp_path: Path) -> None:
+    path, store = tmp_path / "c.toml", MemorySecretStore()
+    # host, user, store? (default no), file/env (file), then save only rest.
+    ask = _answers("bf.example.com", "op", "", "f", "n", "y", "", "n")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+        secrets=store,
+    )
+    assert code == 0
+    assert STORE_QUESTION in ask.prompts
+    (conn,) = load_config(path).connections
+    assert conn.password == "pw"
+    assert conn.password_store is None
+    assert store._secrets == {}
+
+
+def test_setup_store_yes_writes_password_store_and_no_password(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path, store = tmp_path / "c.toml", MemorySecretStore()
+    # No file/env question once the store is chosen.
+    ask = _answers("bf.example.com", "op", "y", "n", "y", "", "y", "wr")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "s3cret-pw",
+        probe_fn=_fake_probe_any(OK_RESULTS),
+        secrets=store,
+    )
+    assert code == 0
+    assert not any("[F/e]" in p for p in ask.prompts)
+    text = path.read_text()
+    assert "s3cret-pw" not in text
+    assert "password =" not in text
+    conns = load_config(path).connections
+    assert {c.name for c in conns} == {"bf-rest", "wr"}
+    for conn in conns:
+        assert conn.password_store == "system"
+        assert conn.password is None
+        assert store.get(secret_account(conn)) == "s3cret-pw"
+        assert conn.resolve_password(secrets=store) == "s3cret-pw"
+    out = capsys.readouterr()
+    assert "memory" in out.err
+    assert "s3cret-pw" not in out.out + out.err
+
+
+def test_setup_without_a_store_does_not_ask(tmp_path: Path) -> None:
+    # conftest: no default store, as on Linux without keyring.
+    ask = _answers("bf.example.com", "op", "f", "n", "y", "", "n")
+    code = run_setup(
+        tmp_path / "c.toml",
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+    )
+    assert code == 0
+    assert not any("instead of the config file" in p for p in ask.prompts)
+
+
+def test_setup_store_failure_falls_back_to_the_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Broken(MemorySecretStore):
+        def set(self, account: str, secret: str) -> None:
+            raise OSError(1312, "CredWrite")
+
+    path = tmp_path / "c.toml"
+    # store? yes; save rest; the store fails, so file or env var is asked then.
+    ask = _answers("bf.example.com", "op", "y", "n", "y", "", "f", "n")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+        secrets=Broken(),
+    )
+    assert code == 0
+    (conn,) = load_config(path).connections
+    assert conn.password == "pw"
+    assert conn.password_store is None
+    assert "could not save the password in memory" in capsys.readouterr().err
+
+
+def test_setup_store_failure_can_switch_to_an_env_var(tmp_path: Path) -> None:
+    class Broken(MemorySecretStore):
+        def set(self, account: str, secret: str) -> None:
+            raise OSError(1312, "CredWrite")
+
+    path = tmp_path / "c.toml"
+    # store? yes; save explorer (fails -> env var), save rest (env var, no re-ask).
+    ask = _answers("bf.example.com", "op", "y", "y", "", "e", "", "y", "", "n")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+        secrets=Broken(),
+    )
+    assert code == 0
+    assert "pw" not in path.read_text().replace("password_env", "")
+    conns = load_config(path).connections
+    assert {c.password_env for c in conns} == {"BFRSR_BF_EXAMPLE_COM_PASSWORD"}
+
+
+def test_setup_saas_store_yes(tmp_path: Path) -> None:
+    path, store = tmp_path / "c.toml", MemorySecretStore()
+    ask = _answers("login.bigfix.com", EMAIL, "y", "y", "")
+    code = run_setup(
+        path,
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_on_prem_probe_not_called,
+        saas_probe_fn=_fake_saas_probe([ProbeResult("saas", "login.bigfix.com", "ok", D5, "")]),
+        secrets=store,
+    )
+    assert code == 0
+    (conn,) = load_config(path).connections
+    assert conn.password_store == "system"
+    assert store.get(secret_account(conn)) == "pw"
+
+
+def test_setup_uses_the_default_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MemorySecretStore()
+    monkeypatch.setattr(secrets, "_default_store", store)
+    ask = _answers("bf.example.com", "op", "y", "n", "y", "", "n")
+    code = run_setup(
+        tmp_path / "c.toml",
+        input_fn=ask,
+        getpass_fn=lambda p: "pw",
+        probe_fn=_fake_probe(OK_RESULTS),
+    )
+    assert code == 0
+    assert list(store._secrets.values()) == ["pw"]
+
+
+def _fake_probe_any(results: list[ProbeResult]) -> Any:
+    async def fake(host: str, username: str, password: str, trust: Any) -> list[ProbeResult]:
+        return results
+
+    return fake

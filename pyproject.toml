@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bigfix-remote-session-relevance"
-version = "1.6.0"
+version = "1.7.0"
 description = "Evaluate BigFix session relevance through the REST API, Web Reports SOAP API, or BigFix Explorer, with one common result type."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -38,13 +38,25 @@ dependencies = [
   "defusedxml>=0.7.1",
   "filelock>=3.16",
   "httpx>=0.28",
+  # The OS password store (macOS Keychain, Windows Credential Manager) for
+  # password_store = "system". Pure Python on these two; not on iOS/Android
+  # (no backend: iOS uses secrets.KeychainSecretStore) or Linux (see the extra).
+  "keyring>=25; sys_platform == 'darwin' or sys_platform == 'win32'",
   "tomlkit>=0.13",
 ]
+
+[project.optional-dependencies]
+# Linux Secret Service (GNOME Keyring, KWallet) via keyring, opt-in because it
+# pulls in compiled packages (cryptography, cffi).
+keyring = ["keyring>=25"]
 
 # Dev tooling lives in a PEP 735 dependency group, which `uv sync` installs by
 # default — an optional-dependencies extra would need `--extra dev` every time.
 [dependency-groups]
 dev = [
+  # A dependency only on macOS/Windows; here so Linux CI type-checks and
+  # tests secrets.py too (conftest keeps tests off any real store).
+  "keyring>=25",
   "mypy>=1.10",
   "pyright>=1.1.400",
   "pytest>=8",
@@ -106,6 +118,7 @@ markers = [
   "live_rest: needs a real root server REST API connection in BFRSR_LIVE_CONFIG (or the default config)",
   "live_webreports: needs a real Web Reports connection in BFRSR_LIVE_CONFIG (or the default config)",
   "live_explorer: needs a real BigFix Explorer connection in BFRSR_LIVE_CONFIG (or the default config)",
+  "real_secret_store: reads and writes this machine's real OS password store (BFRSR_REAL_SECRET_STORE=1), under a unique service, cleaned up; HOME is not redirected",
   "live_saas: needs a real BigFix SaaS connection in BFRSR_LIVE_CONFIG (or the default config)",
 ]
 

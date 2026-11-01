@@ -133,7 +133,10 @@ PUBLIC_NAMES = [
     "ExplorerBackend",
     "ExplorerExtras",
     "HTTPStatusError",
+    "KeychainSecretStore",
+    "KeyringSecretStore",
     "KnownCerts",
+    "MemorySecretStore",
     "RawResponse",
     "ResponseFormatError",
     "RestBackend",
@@ -141,6 +144,7 @@ PUBLIC_NAMES = [
     "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
+    "SecretStore",
     "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
@@ -158,12 +162,14 @@ PUBLIC_NAMES = [
     "client_query_max_targets",
     "data_dir",
     "default_config_path",
+    "default_secret_store",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
     "run_setup",
     "saas_sign_in",
+    "secret_account",
     "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",
@@ -200,6 +206,13 @@ PROVISIONAL = {
     # 1.6.0: for a front end's "Add BigFix SaaS account" screen (issue #34).
     "SaasAccount",
     "saas_sign_in",
+    # 1.7.0: passwords in the OS store, injectable by apps (issue #32).
+    "KeychainSecretStore",
+    "KeyringSecretStore",
+    "MemorySecretStore",
+    "SecretStore",
+    "default_secret_store",
+    "secret_account",
 }
 
 

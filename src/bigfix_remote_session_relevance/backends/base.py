@@ -25,12 +25,14 @@ import httpx
 from .. import local_root_server
 from ..exceptions import ConfigError
 from ..result import ResultError, SessionRelevanceResult
+from ..secrets import DEFAULT_SECRET_STORE, secret_account
 from ..server_address import ServerAddress, normalize_server
 
 if TYPE_CHECKING:
     from types import TracebackType
 
     from ..config import ConnectionConfig
+    from ..secrets import SecretStore
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +248,10 @@ class Backend(ABC):
         )
         self.username = username
         self._password = password
+        # A prompted password to keep in the OS store once the server accepts
+        # it: (store, account, password). Saved earlier, a typo would be
+        # resent every run (and failed SaaS logins lock the account).
+        self._pending_save: tuple[SecretStore, str, str] | None = None
         self._token = token
         self.client_cert = client_cert
         self.client_key = client_key
@@ -284,11 +290,25 @@ class Backend(ABC):
         trust: TrustPolicy | None = None,
         prompt: Callable[[str], str] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+        save_prompted: Callable[[str], bool] | None = None,
     ) -> Self:
-        return cls(
+        """Build from a configured connection.
+
+        ``secrets``: where a ``password_store = "system"`` password is read
+        (default `default_secret_store()`, None for none). ``save_prompted``:
+        asked with the store's name whether to save a prompted password there;
+        it is written once a response shows the server accepted it.
+        """
+        password, offer = (
+            conn._resolve_password_and_store(prompt=prompt, secrets=secrets)
+            if conn.auth == "basic"
+            else (None, None)
+        )
+        backend = cls(
             conn.address,
             username=conn.username,
-            password=conn.resolve_password(prompt=prompt) if conn.auth == "basic" else None,
+            password=password,
             token=conn.resolve_token(),
             client_cert=conn.client_cert,
             client_key=conn.client_key,
@@ -303,6 +323,15 @@ class Backend(ABC):
             local_root_server=conn.credentials == local_root_server.LOCAL_ROOT_SERVER,
             **cls._config_kwargs(conn, prompt),
         )
+        if (
+            offer is not None
+            and password
+            and save_prompted is not None
+            and save_prompted(offer.name)
+        ):
+            # Written once the server accepts it (see _settle_pending_save).
+            backend._pending_save = (offer, secret_account(conn), password)
+        return backend
 
     @classmethod
     def _config_kwargs(
@@ -505,7 +534,7 @@ class Backend(ABC):
                     message=f"cannot load client certificate: {exc}",
                 )
             try:
-                return await operation(client)
+                outcome = await operation(client)
             except httpx.HTTPError as exc:
                 err = error_from_exception(exc, self.name)
                 if (
@@ -528,7 +557,35 @@ class Backend(ABC):
                         continue
                     err = self._untrusted_error(err)
                 return err
+            if self._pending_save is not None:
+                self._settle_pending_save(outcome)
+            return outcome
         raise AssertionError("unreachable")  # pragma: no cover
+
+    def _settle_pending_save(self, outcome: object) -> None:
+        """Save the prompted password once a response shows it was accepted.
+
+        Accepted: an answer, or a session relevance error (the server got
+        that far). Rejected (authentication): dropped, never saved. Anything
+        else (unreachable, a 500): undecided, kept for the next request.
+        """
+        error = outcome if isinstance(outcome, ResultError) else getattr(outcome, "error", None)
+        if isinstance(error, ResultError) and error.kind != "session_relevance":
+            if error.kind == "authentication":
+                self._pending_save = None
+            return
+        assert self._pending_save is not None  # noqa: S101 - checked by the caller
+        store, account, password = self._pending_save
+        self._pending_save = None
+        try:
+            store.set(account, password)
+        except Exception as exc:  # noqa: BLE001 - the password still works
+            log.warning(
+                "%s: could not save the password in %s: %s",
+                self.connection or self.name,
+                store.name,
+                type(exc).__name__,
+            )
 
     def _untrusted_error(self, err: ResultError) -> ResultError:
         """``tls/untrusted``, worded for any front end, not just the CLI.

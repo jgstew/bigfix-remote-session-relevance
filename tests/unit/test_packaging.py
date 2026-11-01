@@ -84,3 +84,31 @@ def test_import_does_not_read_package_metadata() -> None:
         "p.__version__; assert 'importlib.metadata' in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True)  # noqa: S603
+
+
+def _keyring_requirement() -> Any:
+    from packaging.requirements import Requirement
+
+    (found,) = (r for r in map(Requirement, _project()["dependencies"]) if r.name == "keyring")
+    return found
+
+
+@pytest.mark.parametrize(
+    ("platform", "installed"),
+    [("darwin", True), ("win32", True), ("linux", False), ("ios", False), ("android", False)],
+)
+def test_keyring_is_a_dependency_only_on_macos_and_windows(platform: str, installed: bool) -> None:
+    # Pure Python there; Linux pulls compiled cryptography (hence the extra),
+    # and keyring has no iOS or Android backend (issue #32).
+    marker = _keyring_requirement().marker
+    assert marker is not None
+    assert marker.evaluate({"sys_platform": platform}) is installed
+
+
+def test_keyring_extra_installs_it_anywhere() -> None:
+    from packaging.requirements import Requirement
+
+    (extra,) = map(Requirement, _project()["optional-dependencies"]["keyring"])
+    assert extra.name == "keyring"
+    assert extra.marker is None
+    assert extra.specifier == _keyring_requirement().specifier

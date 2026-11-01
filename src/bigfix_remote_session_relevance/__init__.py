@@ -45,6 +45,14 @@ from .paths import data_dir
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .saas_account import SaasAccount, saas_sign_in
+from .secrets import (
+    KeychainSecretStore,
+    KeyringSecretStore,
+    MemorySecretStore,
+    SecretStore,
+    default_secret_store,
+    secret_account,
+)
 from .server_address import ServerAddress
 from .setup_wizard import run_setup
 from .sync import (
@@ -89,7 +97,10 @@ __all__ = [
     "ExplorerBackend",
     "ExplorerExtras",
     "HTTPStatusError",
+    "KeychainSecretStore",
+    "KeyringSecretStore",
     "KnownCerts",
+    "MemorySecretStore",
     "RawResponse",
     "ResponseFormatError",
     "RestBackend",
@@ -97,6 +108,7 @@ __all__ = [
     "SaasAccount",
     "SaasBackend",
     "SaasSessionPool",
+    "SecretStore",
     "ServerAddress",
     "SessionRelevanceClient",
     "SessionRelevanceError",
@@ -114,12 +126,14 @@ __all__ = [
     "client_query_max_targets",
     "data_dir",
     "default_config_path",
+    "default_secret_store",
     "escape_answer",
     "escape_result",
     "evaluate_session_relevance",
     "load_config",
     "run_setup",
     "saas_sign_in",
+    "secret_account",
     "supports_client_query",
     "supports_explorer_extras",
     "unescape_answer",

@@ -12,9 +12,10 @@ from typing import Any
 import httpx
 import pytest
 
-from bigfix_remote_session_relevance import cli
+from bigfix_remote_session_relevance import cli, secrets
 from bigfix_remote_session_relevance.config import ConnectionConfig
 from bigfix_remote_session_relevance.result import SessionRelevanceResult
+from bigfix_remote_session_relevance.secrets import MemorySecretStore, secret_account
 from bigfix_remote_session_relevance.trust import CertInfo, KnownCerts
 
 D1 = "1" * 64
@@ -609,3 +610,139 @@ def test_no_tofu_refuses(
     (store,) = built_stores
     assert store.trust_on_first_use is False
     assert store.callback is None
+
+
+# -- password_store = "system" (issue #32) ------------------------------------------------
+
+STORE_CONFIG = """\
+[[connections]]
+name = "lab"
+backend = "rest"
+server = "lab.example.com"
+username = "op"
+password_store = "system"
+verify = true
+"""
+
+
+@pytest.fixture
+def store_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "store.toml"
+    path.write_text(STORE_CONFIG)
+    os.chmod(path, 0o600)
+    monkeypatch.setenv("BFRSR_CONFIG", str(path))
+    return path
+
+
+def _lab_account() -> str:
+    return secret_account(
+        ConnectionConfig(name="lab", backend="rest", server="lab.example.com", username="op")
+    )
+
+
+@pytest.fixture
+def os_store(monkeypatch: pytest.MonkeyPatch) -> MemorySecretStore:
+    store = MemorySecretStore()
+    monkeypatch.setattr(secrets, "_default_store", store)
+    return store
+
+
+def test_show_config_names_the_password_store(
+    store_config: Path, os_store: MemorySecretStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    os_store.set(_lab_account(), "kept-in-store")
+    assert _run(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    assert "memory" in out
+    assert "kept-in-store" not in out
+
+
+def test_show_config_without_a_store(
+    store_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--show-config"]) == 0
+    assert "system store (none on this machine)" in capsys.readouterr().out
+
+
+def test_forget_password_deletes_the_store_entry(
+    store_config: Path, os_store: MemorySecretStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    os_store.set(_lab_account(), "old")
+    assert _run(["--forget-password", "lab"]) == 0
+    assert os_store.get(_lab_account()) is None
+    assert "forgot the password for lab in memory" in capsys.readouterr().out
+
+
+def test_forget_password_with_nothing_stored(
+    store_config: Path, os_store: MemorySecretStore, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--forget-password", "lab"]) == 1
+    assert "no password for lab in memory" in capsys.readouterr().err
+
+
+def test_forget_password_without_a_store(
+    store_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--forget-password", "lab"]) == 1
+    assert "no OS password store" in capsys.readouterr().err
+
+
+def test_forget_password_unknown_connection(
+    store_config: Path, os_store: MemorySecretStore
+) -> None:
+    assert _run(["--forget-password", "nope"]) == 64
+
+
+def test_forget_password_store_error_is_reported(
+    store_config: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Broken(MemorySecretStore):
+        def delete(self, account: str) -> None:
+            raise OSError(1312, "CredDelete")
+
+    broken = Broken()
+    broken.set(_lab_account(), "old")
+    monkeypatch.setattr(secrets, "_default_store", broken)
+    assert _run(["--forget-password", "lab"]) == 1
+    assert "could not delete" in capsys.readouterr().err
+
+
+def _lab_routes() -> dict[str, Any]:
+    return {"lab": httpx.Response(200, json={"result": ["x"], "plural": False})}
+
+
+def test_store_password_is_used_without_a_prompt(
+    store_config: Path, os_store: MemorySecretStore
+) -> None:
+    os_store.set(_lab_account(), "pw")
+
+    def secret(prompt: str) -> str:
+        raise AssertionError("prompted")
+
+    assert _run(["1"], _lab_routes(), getpass_fn=secret, interactive=True) == 0
+
+
+@pytest.mark.parametrize(("answer", "saved"), [("y", "typed"), ("", None), ("n", None)])
+def test_prompted_password_save_is_offered_default_no(
+    store_config: Path, os_store: MemorySecretStore, answer: str, saved: str | None
+) -> None:
+    asked: list[str] = []
+
+    def ask(prompt: str) -> str:
+        asked.append(prompt)
+        return answer
+
+    code = _run(["1"], _lab_routes(), getpass_fn=lambda _: "typed", input_fn=ask, interactive=True)
+    assert code == 0
+    assert asked == ["Save this password in memory for next time? [y/N] "]
+    assert os_store.get(_lab_account()) == saved
+
+
+def test_save_is_not_offered_when_not_interactive(
+    store_config: Path, os_store: MemorySecretStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def ask(prompt: str) -> str:
+        raise AssertionError("asked")
+
+    _run(["1"], _lab_routes(), input_fn=ask, interactive=False)
+    assert os_store.get(_lab_account()) is None
