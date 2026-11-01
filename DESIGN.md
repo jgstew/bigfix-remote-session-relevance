@@ -593,7 +593,10 @@ prompt, else an `authentication` error without any request.
 | Android, others | none; the app passes its own |
 
 - **Key:** `secret_account(conn)` is `backend:host:port:username` (username
-  lowercased), under service `bigfix-remote-session-relevance`. It isn't the
+  lowercased), under service `bigfix-remote-session-relevance`. A scheme other
+  than https is prefixed, `http+rest:bf:52311:alice`, so a password saved for
+  https is never found, and sent as cleartext Basic auth, for the same server
+  over http (editing the scheme, or a second http connection). It isn't the
   connection name, so renaming keeps the secret and one file maps onto each
   machine's own entry. On macOS keyring's items and `KeychainSecretStore`'s
   are the same Keychain items.

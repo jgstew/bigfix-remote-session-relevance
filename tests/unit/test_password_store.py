@@ -172,6 +172,16 @@ def test_store_is_used_when_nothing_else_is_set() -> None:
     assert prompt.asked == []
 
 
+def test_https_saved_password_is_not_sent_to_the_http_twin() -> None:
+    # Same server, port and user over plain http: the https password must not
+    # be found, or it would go out as cleartext Basic auth.
+    store = _stored(_conn(server="https://bf.example.com:52311"))
+    prompt = Prompt()
+    http_twin = _conn(server="http://bf.example.com:52311")
+    assert http_twin.resolve_password(prompt=prompt, secrets=store) == "typed"
+    assert len(prompt.asked) == 1
+
+
 def test_inline_password_beats_the_store() -> None:
     conn = _conn(password="inline")
     assert conn.resolve_password(secrets=_stored(conn)) == "inline"

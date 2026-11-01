@@ -132,7 +132,9 @@ Apps pass their own store as `secrets=` to `AsyncSessionRelevanceClient`,
 for example `MemorySecretStore`, `KeychainSecretStore()`, or an Android
 Keystore bridge with `name`, `get`, `set` and `delete`. `secrets=None` means
 no store. The default is `default_secret_store()`, which is probed once and
-is `None` when this platform has none. `secret_account(conn)` is the key.
+is `None` when this platform has none. `secret_account(conn)` is the key:
+`backend:host:port:username`, with a non-https scheme in front
+(`http+rest:...`), so an https password is never sent over plain http.
 `save_prompted_password=` (a callable that gets the store's name and returns
 a bool) decides whether a prompted password is saved. It is written once a
 response shows the server accepted it. Without the callable, nothing is

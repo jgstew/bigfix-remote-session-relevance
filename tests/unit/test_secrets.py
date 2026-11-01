@@ -98,6 +98,14 @@ def test_secret_account_without_username() -> None:
     assert secret_account(_conn(username=None)) == "rest:bf.example.com:52311:"
 
 
+def test_secret_account_prefixes_a_non_https_scheme() -> None:
+    # https keys stay unprefixed; bigfix-relevance-debugger uses this exact form.
+    assert secret_account(_conn(server="http://bf.example.com:52311")) == (
+        "http+rest:bf.example.com:52311:admin"
+    )
+    assert secret_account(_conn(server="https://bf.example.com:52311")) == secret_account(_conn())
+
+
 # -- KeyringSecretStore over a fake keyring backend ------------------------------------
 
 
