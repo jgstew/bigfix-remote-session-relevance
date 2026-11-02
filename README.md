@@ -337,8 +337,10 @@ of discovered deployment ids, whatever each run asks for.
 ```python
 from bigfix_remote_session_relevance import AsyncSessionRelevanceClient
 
+
 async def ask_user(question: str) -> str | None:
     return await my_dialog(question, secret=True)  # None if cancelled
+
 
 client = AsyncSessionRelevanceClient(prompt=ask_user)
 results = await client.evaluate("number of bes computers", read_timeout=10)

@@ -486,7 +486,7 @@ Display helpers (1.9.0, from bigfix-relevance-debugger, issue #33) are
 properties derived from the fields, not fields, so they are not in
 `to_dict()`: `host` is `server`'s host name (`https://h:52311` → `h`; a
 bare `h:52311` too; IPv6 without brackets; `None` when unknown or
-unparseable), and `evaluation_time_text` is `evaluation_time_ms` as the
+unparsable), and `evaluation_time_text` is `evaluation_time_ms` as the
 BigFix console shows it (`0.049ms`, `4ms`: at most three decimals, never
 scientific notation; `None` when unknown). The CLI's `-v` line uses it.
 
