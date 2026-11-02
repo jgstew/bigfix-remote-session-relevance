@@ -482,6 +482,14 @@ key.
 | `elapsed_ms` | round trip (excluded from equality) |
 | `raw` | `RawResponse(status_code, content_type, text, format)`; excluded from `repr`, equality and `to_dict()` unless `include_raw=True` |
 
+Display helpers (1.9.0, from bigfix-relevance-debugger, issue #33) are
+properties derived from the fields, not fields, so they are not in
+`to_dict()`: `host` is `server`'s host name (`https://h:52311` → `h`; a
+bare `h:52311` too; IPv6 without brackets; `None` when unknown or
+unparsable), and `evaluation_time_text` is `evaluation_time_ms` as the
+BigFix console shows it (`0.049ms`, `4ms`: at most three decimals, never
+scientific notation; `None` when unknown). The CLI's `-v` line uses it.
+
 String answers are the text the session relevance evaluates to, on every
 backend (Web Reports' `%xx` escapes are decoded; see § Web Reports SOAP).
 **(observed, 11.0.7)** REST (with and without a reachable Explorer),
@@ -517,6 +525,7 @@ Per-query failures are results, never exceptions. `raise_for_error()` (or
 | `http` | other statuses | `service_unavailable` |
 | `response_format` | not the expected JSON/XML (e.g. a login page) | |
 | `unsupported_feature` | Explorer extras on a deployment without Explorer access; a BigFix SaaS fast query with several computer ids | `multiple_targets` (SaaS fast query) |
+| `config` (1.9.0) | a connection whose backend can't be built from its settings, e.g. a server with a path (as `BES_ROOT_SERVER` can give); raises `ConfigError` | |
 
 Session relevance error messages are normalized (`Error:` prefixes, whitespace) so
 the same bad query reads the same on every backend; `detail` keeps the
@@ -550,6 +559,34 @@ length (capture `error_too_large`).
   outage). A group where everything failed returns one result, preferring a
   non-unreachable error, with every connection tried listed in the message.
 - **`all`**: every enabled connection, each result returned.
+- **Config problems (1.9.0, issue #33)**: a `ConfigError` while building a
+  connection's backend (the server is checked before any password prompt)
+  becomes one `config` result for that connection, on every run of the
+  client, in either mode, outside any group (it neither fails over nor is
+  queried), and the others still run. `result_count()` counts it, before
+  the first run too (it checks the server of each connection not built yet). Before
+  1.9.0 it was raised in the middle of the stream. Mistakes in the client's
+  own arguments (an unknown `connections=` name or `backends=` kind) still
+  raise at construction: they are caller bugs. An empty config still gives
+  empty results. The CLI exits 64 when any result is a `config` one, as it
+  did when the error stopped the run.
+- **Per-call read timeout (1.9.0, issue #33)**: `read_timeout=` on every
+  `evaluate*` method (async and sync) replaces each connection's read
+  timeout (read, write and pool, as the configured one) for that call's
+  requests. A BigFix SaaS sign-in or refresh keeps at least the configured
+  one (a request extension the hook reads and removes): a login cut short
+  has an unknown outcome and is sent again on the next query, so with a
+  wrong password a short timeout would cost a failed login per query, and
+  a refresh cut short may have spent the single-use token. It is a context
+  variable read by an httpx request hook, set inside the task that runs the
+  query, so concurrent calls on one client keep their own, and deployment
+  discovery (its own task) keeps the configured timeout. Connect timeouts
+  stay per client. So one long-lived client serves runs with different
+  timeouts, keeping one SaaS sign-in and one set of discovered ids, where
+  bigfix-relevance-debugger kept one client per timeout.
+  `Config.with_timeouts(connect=, read=)` is the per-config form (a copy;
+  None keeps each connection's value, both None returns the same object),
+  which the CLI's `--connect-timeout` / `--timeout` use.
 - **Streaming**: `evaluate_stream` / `evaluate_explorer_stream` yield the
   same results in completion order; the batch forms return them in group
   (or connection) order. Deployments whose ids are already known start at
@@ -635,7 +672,8 @@ bundle path.
 
 The core is async (httpx). `SessionRelevanceClient` runs the async client on
 an anyio blocking portal (its own loop, in a thread), so the sync API also
-works inside a running event loop.
+works inside a running event loop. Prompts and trust callbacks run on that
+loop thread: a sync caller should pass sync prompts.
 
 ## Configuration
 
@@ -664,6 +702,57 @@ connection.
 Password resolution: `password_env`, then `password`, then (with
 `password_store = "system"`) the OS password store, then an interactive
 prompt, else an `authentication` error without any request.
+
+### Prompts (`prompts.py`, 1.9.0, issue #31)
+
+`Prompt = Callable[[str], str | Awaitable[str | None] | None]`: the password
+prompt and the BigFix SaaS TOTP prompt may answer at once or return an
+awaitable, as a `TrustCallback` may, so a GUI on the event loop (NiceGUI,
+Toga, a SwiftUI host through a bridge) awaits a dialog. `ask(prompt,
+message)` calls either. `None` or an empty answer declines: nothing is sent.
+Whatever the prompt raises propagates.
+
+- **Passwords (decision: an async constructor, not lazy resolution).**
+  `Backend.afrom_config` / `abackend_from_config` /
+  `ConnectionConfig.aresolve_password` await the prompt;
+  `AsyncSessionRelevanceClient` builds its backends through them. Resolving
+  lazily on the first request would also skip prompts for connections never
+  used, but a SaaS backend joins its account's `SaasSessionPool` by a key
+  that includes the password, before its first request, and every backend
+  would need a second, async credential path. The sync `from_config` /
+  `backend_from_config` / `resolve_password` stay for sync callers; given an
+  async prompt where a password is needed, they close the awaitable and
+  raise `TypeError`. A SaaS TOTP prompt is awaited at sign-in either way, so
+  the sync builders accept an async prompt when only TOTP is left.
+- **One at a time.** The client wraps the caller's prompt in a lock, so
+  password and TOTP questions never overlap (two dialogs, or two questions
+  on one terminal). A `TrustStore` callback takes turns under its own lock,
+  so a certificate question can still open beside a TOTP one. Backends are built one at a time under a second lock, so
+  concurrent runs on one client (`evaluate_many`) ask for each password once.
+- **TOTP, at most once per code.** The login that met `totp_required` holds
+  the account's session lock while the prompt is awaited, so one challenge
+  is asked once, however many connections share the account. The answer is
+  stripped; a declined or empty one is never sent (it would be a wrong code,
+  one toward the 100-failure lock), and neither is a code already sent for
+  the account through this session (`SaasSession.totp_sent`, so one client
+  or `SaasSessionPool`: a front end handing back the code it collected
+  earlier). Both end as the usual `authentication` / `totp_required`, cached
+  in the session like the no-prompt case. So does a prompt that raises (a
+  cancelled dialog), before the exception propagates, so the account's other
+  connections and concurrent runs don't sign in and ask again.
+- **Long-lived clients and saved sessions (#29).** A client with a prompt
+  drops a cached `totp_required` at the start of each run
+  (`SaasSessionPool.forget_unanswered_challenges`), so a challenge declined
+  in one run is asked again in the next instead of until the client is
+  rebuilt; within a run it is asked once. It never counted toward the lock.
+  Only a challenge no code answered is dropped (`SaasSession.challenge_unanswered`;
+  `sign_in()` follows the same rule): once a code was sent, any refusal,
+  `mfa_mismatch` or even another `totp_required`, counted, and stays cached
+  like any rejection.
+  A saved session that is still usable is adopted without any prompt; a
+  prompt is reached only when a real sign-in is needed (no usable saved
+  session, or the renewal sign-in in the refresh token's last hour, where a
+  declined code falls back to the refresh as a missing one does).
 
 ### Passwords in the OS password store (`secrets.py`)
 

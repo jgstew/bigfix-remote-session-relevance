@@ -22,7 +22,7 @@ from .backends.client_query import (
 )
 from .backends.explorer import ExplorerBackend
 from .backends.explorer_extras import ExplorerExtras, supports_explorer_extras
-from .backends.registry import backend_from_config
+from .backends.registry import abackend_from_config, backend_from_config
 from .backends.rest import RestBackend
 from .backends.saas import SaasBackend, SaasSessionPool
 from .backends.webreports import WebReportsBackend
@@ -42,6 +42,7 @@ from .exceptions import (
     UnsupportedFeatureError,
 )
 from .paths import data_dir
+from .prompts import Prompt, ask
 from .result import ERROR_KINDS, RawResponse, ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .saas_account import SaasAccount, saas_sign_in
@@ -107,6 +108,7 @@ __all__ = [
     "KeyringSecretStore",
     "KnownCerts",
     "MemorySecretStore",
+    "Prompt",
     "RawResponse",
     "ResponseFormatError",
     "RestBackend",
@@ -129,6 +131,8 @@ __all__ = [
     "UnsupportedFeatureError",
     "WebReportsBackend",
     "__version__",
+    "abackend_from_config",
+    "ask",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",

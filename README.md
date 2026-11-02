@@ -249,7 +249,7 @@ it actually collapses something.
 | 1 | a session relevance error; `--trust-cert` declined, `--forget-cert` found no pin, `--forget-password` found no store or no entry, or the store failed, `--forget-session` found no saved session |
 | 2 | nothing reachable, or credentials rejected everywhere; `--discover-deployments` found no id |
 | 3 | partial: some deployments failed |
-| 64 | usage or configuration error, or no connection matched `--connection` / `--backend` |
+| 64 | usage or configuration error (including one connection whose settings can't be used), or no connection matched `--connection` / `--backend` |
 
 ## Library
 
@@ -297,6 +297,62 @@ backend. `escape_answer()` / `unescape_answer()` convert between the two;
 inside a running event loop. Single backends (`RestBackend`,
 `ExplorerBackend`, `WebReportsBackend`, `SaasBackend`) can be used directly
 too.
+
+### One long-lived client (GUIs)
+
+A GUI keeps one client for its lifetime: one BigFix SaaS sign-in and one set
+of discovered deployment ids, whatever each run asks for.
+
+- **Prompts may be async.** `prompt=` (passwords, and BigFix SaaS TOTP codes)
+  may return the answer or an awaitable of it (the `Prompt` type), as a
+  `TrustStore` callback may, so a dialog on the event loop (NiceGUI, Toga, a
+  SwiftUI host through a bridge) is awaited. Returning `None` or `""`
+  declines, and nothing is sent: an empty or wrong TOTP code counts toward
+  BigFix SaaS's permanent lock after 100 failed logins. A TOTP code already
+  sent for the account through the same client (or `SaasSessionPool`) is
+  never sent again either. Password and TOTP prompts are asked one at a time
+  (a `TrustStore` callback has its own turn-taking), and each challenge once;
+  a prompt that raises (a cancelled dialog) declines for the run. A declined
+  TOTP challenge is asked again on the next run; one a code was sent for and
+  refused (`mfa_mismatch`) is not, until the client is rebuilt. A short
+  `read_timeout` never shortens a BigFix SaaS sign-in or refresh. `SessionRelevanceClient` calls prompts on its own loop
+  thread, so a sync caller should pass sync ones.
+- **Per-call read timeout.** `evaluate*(..., read_timeout=seconds)` replaces
+  every connection's configured read timeout for that call only. It bounds
+  each request the query makes, but neither deployment discovery nor a
+  BigFix SaaS sign-in or refresh, which keep at least the configured one. `config.with_timeouts(connect=..., read=...)`
+  returns a copy of a `Config` with every connection's timeouts replaced
+  (the CLI's `--connect-timeout` / `--timeout`).
+- **Config problems are results.** A connection whose settings fail only
+  when its backend is built (a server with a path, as `BES_ROOT_SERVER` can
+  give) comes back as its own result, `error.kind == "config"`, every run,
+  and the other connections still run. It is never asked for a password.
+  Mistakes in the client's own arguments (an unknown `connections=` name or
+  backend) still raise `ConfigError`.
+- **Display helpers.** `result.host` is the server's host name
+  (`https://bf.example.com:52311` → `bf.example.com`, or `None`), and
+  `result.evaluation_time_text` the evaluation time as the console shows it
+  (`0.049ms`, `4ms`, never scientific notation). Neither is in `to_dict()`.
+
+```python
+from bigfix_remote_session_relevance import AsyncSessionRelevanceClient
+
+
+async def ask_user(question: str) -> str | None:
+    return await my_dialog(question, secret=True)  # None if cancelled
+
+
+client = AsyncSessionRelevanceClient(prompt=ask_user)
+results = await client.evaluate("number of bes computers", read_timeout=10)
+for r in results:
+    print(r.host, r.evaluation_time_text, r.error.kind if r.error else r.answers)
+```
+
+`await abackend_from_config(conn, prompt=...)` builds a single backend with
+an async prompt (`backend_from_config` asks for a missing password
+synchronously, and refuses an async prompt with `TypeError` then), and
+`await conn.aresolve_password(prompt=...)` is `resolve_password`'s async
+twin. `ask(prompt, message)` calls either kind of prompt.
 
 The query is always named `session_relevance` (never a bare `relevance`, which
 could mean client relevance): `result.session_relevance`, the `to_dict()` /
@@ -445,7 +501,7 @@ For an "Add BigFix SaaS account" screen, `await saas_sign_in(host, email,
 password)` signs in without a prompt and returns a `SaasAccount`: its
 `servers` (the `sid` values), or its `error` (never raised). It sends one
 login, or two when the account needs MFA and you pass `totp="123456"` (or a
-`prompt` callable); without a code an MFA account comes back as
+`prompt` callable, sync or async); without a code an MFA account comes back as
 `error.code == "totp_required"`, so ask for the code and call again. A
 rejected sign-in is returned, never retried: failed logins count toward a
 permanent account lock.
@@ -514,7 +570,8 @@ Removing or changing any of these needs a new major version:
 `MemorySecretStore`, `KeyringSecretStore`, `KeychainSecretStore`,
 `default_secret_store` and `secret_account`, and (since 1.8.0) the saved
 SaaS session names `SaasSessionStore`, `SavedSaasSession`,
-`default_saas_sessions_path` and `forget_saas_session`, are public and usable, but may change in a minor release
+`default_saas_sessions_path` and `forget_saas_session`, and (since 1.9.0)
+the prompt names `Prompt`, `ask` and `abackend_from_config`, are public and usable, but may change in a minor release
 (noted in its release notes). Use the clients for a stable interface.
 
 Additions (a new result field or `to_dict()` key, error kind or code, flag

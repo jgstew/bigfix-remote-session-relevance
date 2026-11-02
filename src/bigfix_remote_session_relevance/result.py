@@ -16,6 +16,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import defusedxml.ElementTree as SafeET
 
@@ -34,6 +35,7 @@ ERROR_KINDS: tuple[str, ...] = (
     "http",
     "response_format",
     "unsupported_feature",
+    "config",
 )
 
 RawFormat = Literal["json", "xml", "text"]
@@ -172,6 +174,32 @@ class SessionRelevanceResult:
     @property
     def count(self) -> int:
         return len(self.answers)
+
+    @property
+    def host(self) -> str | None:
+        """The server's host name, for display: ``https://h:52311`` -> ``h``.
+
+        A bare ``h:52311`` works too. None when there is no server or it
+        cannot be read. IPv6 addresses come without brackets.
+        """
+        if not self.server:
+            return None
+        try:
+            host = urlsplit(self.server if "://" in self.server else f"//{self.server}").hostname
+        except ValueError:
+            return None
+        return host or None
+
+    @property
+    def evaluation_time_text(self) -> str | None:
+        """``evaluation_time_ms`` as the BigFix console shows it: ``0.049ms``, ``4ms``.
+
+        At most three decimals and never scientific notation; None when the
+        server reported no time.
+        """
+        if self.evaluation_time_ms is None:
+            return None
+        return f"{self.evaluation_time_ms:.3f}".rstrip("0").rstrip(".") + "ms"
 
     def raise_for_error(self) -> SessionRelevanceResult:
         """Raise the kind-specific exception if this result failed; else return self."""

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import getpass
 import io
 import json
@@ -360,19 +359,7 @@ def _parse_filters(values: list[str] | None) -> dict[str, str] | None:
 
 
 def _apply_timeouts(config: Config, args: argparse.Namespace) -> Config:
-    if args.connect_timeout is None and args.timeout is None:
-        return config
-    connections = tuple(
-        dataclasses.replace(
-            c,
-            connect_timeout=c.connect_timeout
-            if args.connect_timeout is None
-            else args.connect_timeout,
-            read_timeout=c.read_timeout if args.timeout is None else args.timeout,
-        )
-        for c in config.connections
-    )
-    return dataclasses.replace(config, connections=connections)
+    return config.with_timeouts(connect=args.connect_timeout, read=args.timeout)
 
 
 def _no_connections(

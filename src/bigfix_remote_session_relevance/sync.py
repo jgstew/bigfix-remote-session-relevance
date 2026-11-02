@@ -1,5 +1,9 @@
 """`SessionRelevanceClient`: the synchronous face of the async client.
 
+Prompts (``prompt=``, ``trust=``'s callback) are called on the client's loop
+thread. A sync caller should pass sync prompts; an async one runs on that
+thread's loop, not the caller's.
+
 The async client runs on its own event loop in a background thread (an
 anyio blocking portal), so the sync API also works when the caller is
 already inside a running loop, such as a notebook or an async web app,
@@ -29,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Self, TypeVar
 import anyio
 from anyio.from_thread import BlockingPortal
 
+from .backends.base import check_read_timeout
 from .backends.explorer_extras import explorer_body
 from .client import AsyncSessionRelevanceClient
 from .result import SessionRelevanceResult
@@ -70,23 +75,46 @@ class SessionRelevanceClient:
             raise RuntimeError("SessionRelevanceClient is closed")
         return self._portal.call(functools.partial(func, *args, **kwargs))
 
-    def evaluate(self, session_relevance: str, *, unescape: bool = True) -> SessionRelevanceResults:
+    def evaluate(
+        self,
+        session_relevance: str,
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
+    ) -> SessionRelevanceResults:
         result: SessionRelevanceResults = self._call(
-            self._client.evaluate, session_relevance, unescape=unescape
+            self._client.evaluate, session_relevance, unescape=unescape, read_timeout=read_timeout
         )
         return result
 
     def evaluate_stream(
-        self, session_relevance: str, *, unescape: bool = True
+        self,
+        session_relevance: str,
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> Iterator[SessionRelevanceResult]:
         """`evaluate`, yielding each result as it lands (completion order)."""
-        return self._iterate(self._client.evaluate_stream, session_relevance, unescape=unescape)
+        check_read_timeout(read_timeout)  # raises here, not at the first next()
+        return self._iterate(
+            self._client.evaluate_stream,
+            session_relevance,
+            unescape=unescape,
+            read_timeout=read_timeout,
+        )
 
     def evaluate_many(
-        self, session_relevances: Iterable[str], *, unescape: bool = True
+        self,
+        session_relevances: Iterable[str],
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> list[SessionRelevanceResults]:
         result: list[SessionRelevanceResults] = self._call(
-            self._client.evaluate_many, list(session_relevances), unescape=unescape
+            self._client.evaluate_many,
+            list(session_relevances),
+            unescape=unescape,
+            read_timeout=read_timeout,
         )
         return result
 
@@ -97,6 +125,7 @@ class SessionRelevanceClient:
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
         unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> SessionRelevanceResults:
         result: SessionRelevanceResults = self._call(
             self._client.evaluate_explorer,
@@ -104,6 +133,7 @@ class SessionRelevanceClient:
             keys=keys,
             filters=filters,
             unescape=unescape,
+            read_timeout=read_timeout,
         )
         return result
 
@@ -114,14 +144,17 @@ class SessionRelevanceClient:
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
         unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> Iterator[SessionRelevanceResult]:
         explorer_body(session_relevance, keys, filters)  # invalid input raises here, not mid-stream
+        check_read_timeout(read_timeout)
         return self._iterate(
             self._client.evaluate_explorer_stream,
             session_relevance,
             keys=keys,
             filters=filters,
             unescape=unescape,
+            read_timeout=read_timeout,
         )
 
     def result_count(self) -> int | None:

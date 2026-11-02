@@ -103,11 +103,11 @@ class HumanRenderer:
             # hold every answer back until the slowest deployment is done.
             self._out.flush()
             if self._verbose:
-                time = "?" if r.evaluation_time_ms is None else f"{r.evaluation_time_ms:g}"
+                time = r.evaluation_time_text or "?ms"
                 type_ = escape_controls(r.type) if self._escape_err and r.type else r.type
                 self._err.write(
                     f"# connection={r.connection} backend={r.backend} type={type_} "
-                    f"plural={r.plural} count={r.count} time={time}ms\n"
+                    f"plural={r.plural} count={r.count} time={time}\n"
                 )
         elif r.error is not None:
             self._err.write(f"{format_error(r, escape=self._escape_err)}\n")
@@ -206,6 +206,10 @@ def _unreachable(r: SessionRelevanceResult) -> bool:
 
 def exit_code(results: SessionRelevanceResults) -> int:
     if not results:
+        return EXIT_USAGE
+    # A connection the config gets wrong: the usage error it was when such
+    # a problem stopped the whole run.
+    if any(r.error is not None and r.error.kind == "config" for r in results):
         return EXIT_USAGE
     if any(r.error is not None and r.error.kind == "session_relevance" for r in results):
         return EXIT_RELEVANCE_ERROR

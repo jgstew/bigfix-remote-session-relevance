@@ -68,4 +68,6 @@ EXCEPTION_FOR_KIND: dict[str, type[SessionRelevanceError]] = {
     "http": HTTPStatusError,
     "response_format": ResponseFormatError,
     "unsupported_feature": UnsupportedFeatureError,
+    # A connection whose backend could not be built from its settings.
+    "config": ConfigError,
 }

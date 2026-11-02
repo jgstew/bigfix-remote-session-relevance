@@ -137,6 +137,7 @@ PUBLIC_NAMES = [
     "KeyringSecretStore",
     "KnownCerts",
     "MemorySecretStore",
+    "Prompt",
     "RawResponse",
     "ResponseFormatError",
     "RestBackend",
@@ -159,6 +160,8 @@ PUBLIC_NAMES = [
     "UnsupportedFeatureError",
     "WebReportsBackend",
     "__version__",
+    "abackend_from_config",
+    "ask",
     "async_evaluate_session_relevance",
     "backend_from_config",
     "client_query_max_targets",
@@ -222,6 +225,10 @@ PROVISIONAL = {
     "SavedSaasSession",
     "default_saas_sessions_path",
     "forget_saas_session",
+    # 1.9.0: async password and TOTP prompts, for GUIs (issue #31).
+    "Prompt",
+    "abackend_from_config",
+    "ask",
 }
 
 
