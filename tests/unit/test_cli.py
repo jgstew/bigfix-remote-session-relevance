@@ -16,6 +16,7 @@ from bigfix_remote_session_relevance import cli, secrets
 from bigfix_remote_session_relevance.config import ConnectionConfig
 from bigfix_remote_session_relevance.result import SessionRelevanceResult
 from bigfix_remote_session_relevance.secrets import MemorySecretStore, secret_account
+from bigfix_remote_session_relevance.server_address import ServerAddress
 from bigfix_remote_session_relevance.trust import CertInfo, KnownCerts
 
 D1 = "1" * 64
@@ -746,3 +747,103 @@ def test_save_is_not_offered_when_not_interactive(
 
     _run(["1"], _lab_routes(), input_fn=ask, interactive=False)
     assert os_store.get(_lab_account()) is None
+
+
+# -- saved BigFix SaaS sessions (#29) ------------------------------------------------
+
+SAAS_CONFIG = """\
+[[connections]]
+name = "saas"
+backend = "saas"
+server = "login.bigfix.com"
+username = "Operator@Example.com"
+password_env = "TEST_BFRSR_PW"
+
+[[connections]]
+name = "saas-off"
+backend = "saas"
+server = "eulogin.bigfix.com"
+username = "operator@example.com"
+password_env = "TEST_BFRSR_PW"
+session_cache = false
+
+[[connections]]
+name = "dev-root"
+backend = "rest"
+server = "root.example.com"
+username = "op"
+password_env = "TEST_BFRSR_PW"
+"""
+
+
+@pytest.fixture
+def saas_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = tmp_path / "saas.toml"
+    path.write_text(SAAS_CONFIG)
+    os.chmod(path, 0o600)
+    monkeypatch.setenv("BFRSR_CONFIG", str(path))
+    return path
+
+
+def _saved_session() -> Any:
+    import base64
+
+    from bigfix_remote_session_relevance.saas_sessions import SavedSaasSession
+
+    claims = base64.urlsafe_b64encode(b'{"eml": "operator@example.com"}').decode().rstrip("=")
+    return SavedSaasSession(
+        access_token=f"h.{claims}.ACCESS-SECRET",
+        refresh_token="REFRESH-SECRET",
+        access_exp=time.time() + 3600,
+        refresh_exp=time.time() + 86400,
+    )
+
+
+def _api(host: str = "api.bigfix.com") -> ServerAddress:
+    return ServerAddress(scheme="https", host=host, port=443)
+
+
+def test_forget_session_deletes_the_saved_session(
+    saas_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from bigfix_remote_session_relevance.saas_sessions import SaasSessionStore
+
+    SaasSessionStore().save(_api(), "operator@example.com", _saved_session())
+    assert _run(["--forget-session", "saas"]) == 0
+    assert SaasSessionStore().load(_api(), "operator@example.com") is None
+    out = capsys.readouterr().out
+    assert "forgot the saved BigFix SaaS session for saas" in out
+    assert "SECRET" not in out
+
+
+def test_forget_session_with_nothing_saved(
+    saas_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--forget-session", "saas"]) == 1
+    assert "no saved session for saas" in capsys.readouterr().err
+
+
+def test_forget_session_needs_a_saas_connection(
+    saas_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(["--forget-session", "dev-root"]) == 64
+    assert "BigFix SaaS" in capsys.readouterr().err
+
+
+def test_forget_session_unknown_connection(saas_config: Path) -> None:
+    assert _run(["--forget-session", "nope"]) == 64
+
+
+def test_show_config_shows_session_cache_not_tokens(
+    saas_config: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from bigfix_remote_session_relevance.saas_sessions import SaasSessionStore
+
+    SaasSessionStore().save(_api(), "operator@example.com", _saved_session())
+    assert _run(["--show-config"]) == 0
+    out = capsys.readouterr().out
+    header, *rows = out.splitlines()[1:]
+    assert header.split()[-1] == "session_cache"  # last: other cells hold spaces
+    cells = {row.split()[0]: row.split()[-1] for row in rows}
+    assert cells == {"saas": "on", "saas-off": "off", "dev-root": "-"}
+    assert "SECRET" not in out

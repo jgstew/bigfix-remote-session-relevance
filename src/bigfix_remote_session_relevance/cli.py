@@ -28,6 +28,7 @@ from .exceptions import ConfigError
 from .render import EXIT_USAGE, HumanRenderer, exit_code, format_error, is_terminal
 from .result import SessionRelevanceResult
 from .results import SessionRelevanceResults
+from .saas_sessions import forget_saas_session
 from .server_address import normalize_server
 from .sync import SessionRelevanceClient
 from .trust import CertInfo, KnownCerts, TrustStore, fetch_server_cert
@@ -91,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--forget-password",
         metavar="NAME",
         help="delete a connection's password from this machine's OS password store",
+    )
+    setup.add_argument(
+        "--forget-session",
+        metavar="NAME",
+        help="delete a BigFix SaaS connection's saved session (the next run signs in again)",
     )
 
     sel = p.add_argument_group("selection")
@@ -179,6 +185,8 @@ def main(
             return _show_config(config)
         if args.forget_password:
             return _forget_password(config, args.forget_password)
+        if args.forget_session:
+            return _forget_session(config, args.forget_session)
         if not config.connections:
             return _no_connections(args, is_interactive, ask, secret)
         config = _apply_timeouts(config, args)
@@ -417,6 +425,15 @@ def _forget_password(config: Config, name: str) -> int:
     return 0
 
 
+def _forget_session(config: Config, name: str) -> int:
+    conn = config.connection(name)
+    if not forget_saas_session(conn):
+        print(f"no saved session for {name}", file=sys.stderr)
+        return 1
+    print(f"forgot the saved BigFix SaaS session for {name}")
+    return 0
+
+
 def _show_config(config: Config) -> int:
     rows = redacted_summary(config)
     print(f"# {config.path or '(no file)'} ({config.source})")
@@ -433,6 +450,7 @@ def _show_config(config: Config) -> int:
         "deployment_id",
         "verify",
         "enabled",
+        "session_cache",
     ]
     table = [[_cell(c, r[c]) for c in columns] for r in rows]
     widths = [max(len(c), *(len(row[i]) for row in table)) for i, c in enumerate(columns)]

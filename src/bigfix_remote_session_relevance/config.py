@@ -101,6 +101,7 @@ _KEY_ALIASES = {
     "enabled": "enabled",
     "sid": "sid",
     "credentials": "credentials",
+    "session_cache": "session_cache",
 }
 
 
@@ -137,6 +138,8 @@ class ConnectionConfig:
     client_key_password_env: str | None = None
     deployment_id: str | None = None
     sid: str | None = None  # BigFix SaaS server id ("bf" + digits); saas only
+    # saas only: save the signed-in session across runs (saas_sessions.py).
+    session_cache: bool = True
     verify: bool | str | None = None
     connect_timeout: float | None = None
     read_timeout: float | None = None
@@ -500,6 +503,11 @@ def _connection_from_mapping(raw: Any, index: int) -> ConnectionConfig:
     for key in ("connect_timeout", "read_timeout"):
         if key in values:
             values[key] = float(values[key])
+    if "session_cache" in values:
+        if not isinstance(values["session_cache"], bool):
+            raise ConfigError(f"{where}: session_cache must be true or false")
+        if backend != "saas":
+            raise ConfigError(f'{where}: session_cache only applies to backend = "saas"')
 
     conn = ConnectionConfig(
         name=name.strip(),
@@ -667,7 +675,7 @@ def save_connection(
     table = tomlkit.table()
     for key in _SAVE_ORDER:
         value = getattr(conn, key)
-        if value is None or (key == "enabled" and value is True):
+        if value is None or (key in ("enabled", "session_cache") and value is True):
             continue
         if key == "server" and conn.credentials == LOCAL_ROOT_SERVER:
             continue  # RESTURL, read from the root server
@@ -778,6 +786,9 @@ def redacted_summary(
                 "client_cert": "set" if c.client_cert else "unset",
                 "deployment_id": c.deployment_id,
                 "sid": c.sid,
+                "session_cache": ("on" if c.session_cache else "off")
+                if c.backend == "saas"
+                else None,
                 "verify": c.verify
                 if isinstance(c.verify, bool) or c.verify == "tofu"
                 else "ca bundle",

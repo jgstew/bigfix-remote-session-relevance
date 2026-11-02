@@ -62,6 +62,7 @@ server = "login.bigfix.com"            # or eulogin.bigfix.com; queries go to ap
 username = "<EMAIL>"
 password_env = "BFRSR_SAAS_PASSWORD"
 # sid = "bf<digits>"                   # only to pick one of several BigFix servers
+# session_cache = false                # don't save the signed-in session across runs
 verify = true                          # CA-signed service: no trust on first use
 # enabled = false                      # any connection can be disabled
 
