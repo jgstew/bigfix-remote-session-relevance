@@ -91,7 +91,7 @@ from ..secrets import DEFAULT_SECRET_STORE
 from ..server_address import saas_api_address
 from ..value_types import loads_json
 from ._parsing import _float_or_none, _format_error, _session_relevance_error, raw_from_response
-from .base import Backend, error_from_status
+from .base import KEEP_READ_TIMEOUT, Backend, error_from_status
 from .client_query import (
     ClientQueryResponse,
     ClientQueryRow,
@@ -199,6 +199,9 @@ class SaasSession:
         # that hands one back (a front end reusing what it collected) must not
         # get it sent again as a wrong code.
         self.totp_sent: set[str] = set()
+        # The cached failure is a totp_required that no code answered (no
+        # prompt, or it declined): asking again cannot cost a failed login.
+        self.challenge_unanswered = False
 
     def fresh(self) -> bool:
         return (
@@ -230,11 +233,12 @@ class SaasSessionPool:
         For a client that has a TOTP prompt, at the start of each run: within
         a run the account is asked once, and a declined (or unanswered)
         challenge then waits for the next run, not for a new client. It never
-        counted toward the lockout. A rejected code (``mfa_mismatch``) did,
-        and stays cached like any rejection.
+        counted toward the lockout. A sent code that was refused did
+        (``mfa_mismatch``, or anything else), and stays cached like any
+        rejection.
         """
         for session in self._sessions.values():
-            if session.failure is not None and session.failure.code == "totp_required":
+            if session.failure is not None and session.challenge_unanswered:
                 session.failure = None
 
 
@@ -360,10 +364,9 @@ class SaasBackend(Backend):
         is the challenge being answered, not a rejected login resent. A
         rejected code (``mfa_mismatch``) stays cached like any rejection.
         """
-        failure = self._session.failure
         if (
-            failure is not None
-            and failure.code == "totp_required"
+            self._session.failure is not None
+            and self._session.challenge_unanswered
             and self._totp_prompt is not None
         ):
             self._session.failure = None
@@ -636,7 +639,13 @@ class SaasBackend(Backend):
             # The server's own challenge, not a retry of a failed login. Asked
             # once: this login holds the session lock, and the answer is sent
             # once, or not at all.
-            code = await self._ask_totp()
+            try:
+                code = await self._ask_totp()
+            except BaseException:
+                # A cancelled dialog declines too: cached, so the account's
+                # other connections don't sign in and ask again this run.
+                self._cache_failure(self._totp_error(response, _TOTP_DECLINED), unanswered=True)
+                raise
             if code and code not in self._session.totp_sent:
                 self._session.totp_sent.add(code)
                 return await self._login(client, totp=code)
@@ -650,18 +659,39 @@ class SaasBackend(Backend):
             message = _TOTP_NO_SESSION
         if unanswered is not None:
             message = unanswered
-        error = ResultError(
+        error = (
+            self._totp_error(response, message)
+            if known
+            else ResultError(
+                kind="authentication",
+                code="login_failed",
+                backend=self.name,
+                http_status=response.status_code,
+                message=message,
+                detail=signal,
+            )
+        )
+        # Never POST these credentials again, from this backend or any other
+        # sharing the session: repeated failures lock the account for good.
+        # Only a challenge no code answered may be asked again (a new run, or
+        # sign_in() with a prompt).
+        self._cache_failure(error, unanswered=signal == "totp_required" and totp is None)
+        return error
+
+    def _totp_error(self, response: httpx.Response, message: str) -> ResultError:
+        signal = _error_message(response)
+        return ResultError(
             kind="authentication",
-            code=signal if known else "login_failed",
+            code=signal,
             backend=self.name,
             http_status=response.status_code,
             message=message,
             detail=signal,
         )
-        # Never POST these credentials again, from this backend or any other
-        # sharing the session: repeated failures lock the account for good.
+
+    def _cache_failure(self, error: ResultError, *, unanswered: bool) -> None:
         self._session.failure = error
-        return error
+        self._session.challenge_unanswered = unanswered
 
     async def _ask_totp(self) -> str | None:
         """The code the prompt gives, stripped; None if it declined."""
@@ -828,6 +858,12 @@ class SaasBackend(Backend):
         }
         if sid is not None:
             envelope["sid"] = sid
+        if path in (LOGIN_PATH, REFRESH_PATH):
+            # Never cut short by a per-call read_timeout: a sign-in that times
+            # out is sent again, its outcome unknown (a wrong password then
+            # costs a failed login per query), and a refresh may have spent
+            # the single-use token.
+            return await client.post(path, json=envelope, extensions={KEEP_READ_TIMEOUT: True})
         return await client.post(path, json=envelope)
 
 

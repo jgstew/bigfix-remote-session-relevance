@@ -309,15 +309,18 @@ of discovered deployment ids, whatever each run asks for.
   SwiftUI host through a bridge) is awaited. Returning `None` or `""`
   declines, and nothing is sent: an empty or wrong TOTP code counts toward
   BigFix SaaS's permanent lock after 100 failed logins. A TOTP code already
-  sent for the account is never sent again either. Prompts are asked one at
-  a time, and each challenge once. A declined TOTP challenge is asked again
-  on the next run; a rejected code (`mfa_mismatch`) is not, until the client
-  is rebuilt. `SessionRelevanceClient` calls prompts on its own loop
+  sent for the account through the same client (or `SaasSessionPool`) is
+  never sent again either. Password and TOTP prompts are asked one at a time
+  (a `TrustStore` callback has its own turn-taking), and each challenge once;
+  a prompt that raises (a cancelled dialog) declines for the run. A declined
+  TOTP challenge is asked again on the next run; one a code was sent for and
+  refused (`mfa_mismatch`) is not, until the client is rebuilt. A short
+  `read_timeout` never shortens a BigFix SaaS sign-in or refresh. `SessionRelevanceClient` calls prompts on its own loop
   thread, so a sync caller should pass sync ones.
 - **Per-call read timeout.** `evaluate*(..., read_timeout=seconds)` replaces
   every connection's configured read timeout for that call only. It bounds
-  each request the query makes (a BigFix SaaS sign-in included), not
-  deployment discovery. `config.with_timeouts(connect=..., read=...)`
+  each request the query makes, but neither deployment discovery nor a
+  BigFix SaaS sign-in or refresh, which keep at least the configured one. `config.with_timeouts(connect=..., read=...)`
   returns a copy of a `Config` with every connection's timeouts replaced
   (the CLI's `--connect-timeout` / `--timeout`).
 - **Config problems are results.** A connection whose settings fail only

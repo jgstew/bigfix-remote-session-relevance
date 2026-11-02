@@ -268,12 +268,24 @@ class AsyncSessionRelevanceClient:
         A connection with a config problem is one result of its own."""
         if not self._local_settled and self._droppable_local():
             return None
-        problems = len(self._config_problems)
+        # Not built yet, a connection with a bad server is still selected:
+        # count it as the config result it will be, not in its deployment.
+        unbuildable = {c.name for c in self._connections if self._unbuildable(c)}
+        problems = len(self._config_problems) + len(unbuildable)
         if self.mode == "all":
-            return len(self._connections) + problems
+            return len(self._connections) - len(unbuildable) + problems
         if self._discovery_pending():
             return None
-        return len(self._groups()) + problems
+        return len(self._groups(exclude=unbuildable)) + problems
+
+    def _unbuildable(self, conn: ConnectionConfig) -> bool:
+        if conn.name in self._backends:
+            return False
+        try:
+            BACKEND_CLASSES[conn.backend]._address_from_config(conn)
+        except ConfigError:
+            return True
+        return False
 
     async def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         """Ask every selected connection for its deployment id (and record it)."""
@@ -431,9 +443,13 @@ class AsyncSessionRelevanceClient:
         except (ConfigError, OSError) as exc:
             log.warning("%s: could not record deployment_id in %s: %s", conn.name, path, exc)
 
-    def _groups(self) -> list[tuple[str, list[ConnectionConfig]]]:
+    def _groups(
+        self, *, exclude: set[str] | frozenset[str] = frozenset()
+    ) -> list[tuple[str, list[ConnectionConfig]]]:
         groups: dict[str, list[ConnectionConfig]] = {}
         for conn in self._connections:
+            if conn.name in exclude:
+                continue
             key = group_key(conn.name, self._deployment_ids[conn.name])
             groups.setdefault(key, []).append(conn)
         rank = {name: i for i, name in enumerate(self.config.backend_preference)}

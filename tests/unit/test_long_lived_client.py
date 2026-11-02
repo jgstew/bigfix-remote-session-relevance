@@ -317,3 +317,27 @@ def test_evaluation_time_text(ms: float | None, text: str | None) -> None:
 def test_display_helpers_are_not_part_of_to_dict() -> None:
     data = SessionRelevanceResult("q", server="https://h:52311").to_dict()
     assert "host" not in data and "evaluation_time_text" not in data
+
+
+# -- review findings ---------------------------------------------------------------------
+
+
+async def test_a_short_read_timeout_does_not_shorten_the_saas_sign_in() -> None:
+    # A login cut short is resent next query, its outcome unknown: a wrong
+    # password then costs a failed login per query, toward the lockout.
+    conn = _conn("saas", "saas", server="login.bigfix.com", username="op@example.com", sid="bf1")
+    rec = Recorder()
+    async with _client([conn], rec) as client:
+        assert (await client.evaluate("1", read_timeout=5)).ok
+        assert (await client.evaluate("1", read_timeout=60)).ok
+    assert rec.reads("/auth/v1/user/login") == [30]  # the configured one
+    assert rec.reads("/bfproxy/v2/relevance") == [5, 60]
+    assert all("bfrsr" not in str(k) for _, _, t in rec.seen for k in t)
+
+
+async def test_result_count_before_the_first_run_with_a_config_problem_in_a_deployment() -> None:
+    rec = Recorder()
+    async with _client([_conn("good"), _broken(dep=D1)], rec) as client:
+        before = client.result_count()
+        results = await client.evaluate("1")
+        assert before == client.result_count() == len(results) == 2

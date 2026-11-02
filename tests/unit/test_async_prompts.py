@@ -390,3 +390,78 @@ def test_backend_from_config_keeps_an_async_totp_prompt() -> None:
     # in the sign-in, so a sync build takes an async prompt.
     backend = backend_from_config(_saas_conn(), prompt=AsyncPrompt("123456"))
     assert isinstance(backend, SaasBackend)
+
+
+# -- review findings ---------------------------------------------------------------------
+
+
+async def test_a_challenge_answered_with_a_code_is_never_asked_again() -> None:
+    # If the service ever answers a sent code with totp_required again, that
+    # code counted toward the lockout: cached for good, like mfa_mismatch.
+    account = Saas(_signal("totp_required"))
+    prompt = AsyncPrompt("000001", "000002", "000003")
+    async with AsyncSessionRelevanceClient(
+        Config(connections=(_saas_conn(),)),
+        prompt=prompt,
+        trust=None,
+        transport_factory=account.transport,
+    ) as client:
+        for _ in range(3):
+            await client.evaluate("1")
+    assert [body.get("totp") for body in account.login_bodies] == [None, "000001"]
+    assert len(prompt.asked) == 1
+
+
+async def test_sign_in_keeps_a_challenge_answered_with_a_code() -> None:
+    account = Saas(_signal("totp_required"))
+    prompt = AsyncPrompt("000001", "000002")
+    async with _saas(account, prompt) as backend:
+        await backend.sign_in()
+        await backend.sign_in()
+    assert [body.get("totp") for body in account.login_bodies] == [None, "000001"]
+
+
+async def test_a_prompt_that_raises_is_asked_once_per_run() -> None:
+    # A cancelled dialog declines for the run: the other connections of the
+    # account (and concurrent runs) must not sign in and ask again.
+    account = Saas(_signal("totp_required"), _login_ok())
+    asked: list[str] = []
+
+    async def cancelled(message: str) -> str:
+        asked.append(message)
+        raise RuntimeError("dialog closed")
+
+    conns = (_saas_conn("a", "bf1"), _saas_conn("b", "bf2"), _saas_conn("c", "bf3"))
+    async with AsyncSessionRelevanceClient(
+        Config(connections=conns),
+        mode="all",
+        prompt=cancelled,
+        trust=None,
+        transport_factory=account.transport,
+    ) as client:
+        with pytest.raises(RuntimeError):
+            await client.evaluate_many(["1", "2", "3"])
+    assert len(asked) == 1
+    assert account.paths["/auth/v1/user/login"] == 1
+
+
+async def test_a_raised_prompt_is_asked_again_next_run() -> None:
+    account = Saas(_signal("totp_required"), _signal("totp_required"), _login_ok())
+    answers: list[str | Exception] = [RuntimeError("closed"), "123456"]
+
+    async def prompt(message: str) -> str:
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async with AsyncSessionRelevanceClient(
+        Config(connections=(_saas_conn(),)),
+        prompt=prompt,
+        trust=None,
+        transport_factory=account.transport,
+    ) as client:
+        with pytest.raises(RuntimeError):
+            await client.evaluate("1")
+        assert (await client.evaluate("2")).ok
+    assert [body.get("totp") for body in account.login_bodies] == [None, None, "123456"]

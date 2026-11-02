@@ -221,6 +221,8 @@ class _ClientCertError(Exception):
 # own, and work started elsewhere (deployment discovery) keeps the configured
 # one.
 _CALL_READ_TIMEOUT: ContextVar[float | None] = ContextVar("bfrsr_read_timeout", default=None)
+# A request extension: never shorten this request's read timeout (sign-in).
+KEEP_READ_TIMEOUT = "bfrsr_keep_read_timeout"
 
 
 def check_read_timeout(seconds: float | None) -> float | None:
@@ -593,6 +595,9 @@ class Backend(ABC):
 
     async def _apply_call_read_timeout(self, request: httpx.Request) -> None:
         read = _CALL_READ_TIMEOUT.get()
+        # Popped either way: only this hook knows the marker.
+        if request.extensions.pop(KEEP_READ_TIMEOUT, False) and read is not None:
+            read = max(read, self.timeout.read or read)
         if read is not None:
             # As the constructor's read_timeout: read, write and pool; the
             # connect timeout stays the configured one.

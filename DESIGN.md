@@ -563,7 +563,8 @@ length (capture `error_too_large`).
   connection's backend (the server is checked before any password prompt)
   becomes one `config` result for that connection, on every run of the
   client, in either mode, outside any group (it neither fails over nor is
-  queried), and the others still run. `result_count()` counts it. Before
+  queried), and the others still run. `result_count()` counts it, before
+  the first run too (it checks the server of each connection not built yet). Before
   1.9.0 it was raised in the middle of the stream. Mistakes in the client's
   own arguments (an unknown `connections=` name or `backends=` kind) still
   raise at construction: they are caller bugs. An empty config still gives
@@ -572,7 +573,11 @@ length (capture `error_too_large`).
 - **Per-call read timeout (1.9.0, issue #33)**: `read_timeout=` on every
   `evaluate*` method (async and sync) replaces each connection's read
   timeout (read, write and pool, as the configured one) for that call's
-  requests, a BigFix SaaS sign-in or refresh included. It is a context
+  requests. A BigFix SaaS sign-in or refresh keeps at least the configured
+  one (a request extension the hook reads and removes): a login cut short
+  has an unknown outcome and is sent again on the next query, so with a
+  wrong password a short timeout would cost a failed login per query, and
+  a refresh cut short may have spent the single-use token. It is a context
   variable read by an httpx request hook, set inside the task that runs the
   query, so concurrent calls on one client keep their own, and deployment
   discovery (its own task) keeps the configured timeout. Connect timeouts
@@ -721,22 +726,29 @@ Whatever the prompt raises propagates.
   the sync builders accept an async prompt when only TOTP is left.
 - **One at a time.** The client wraps the caller's prompt in a lock, so
   password and TOTP questions never overlap (two dialogs, or two questions
-  on one terminal). Backends are built one at a time under a second lock, so
+  on one terminal). A `TrustStore` callback takes turns under its own lock,
+  so a certificate question can still open beside a TOTP one. Backends are built one at a time under a second lock, so
   concurrent runs on one client (`evaluate_many`) ask for each password once.
 - **TOTP, at most once per code.** The login that met `totp_required` holds
   the account's session lock while the prompt is awaited, so one challenge
   is asked once, however many connections share the account. The answer is
   stripped; a declined or empty one is never sent (it would be a wrong code,
   one toward the 100-failure lock), and neither is a code already sent for
-  the account (`SaasSession.totp_sent`: a front end handing back the code it
-  collected earlier). Both end as the usual `authentication` /
-  `totp_required`, cached in the session like the no-prompt case.
+  the account through this session (`SaasSession.totp_sent`, so one client
+  or `SaasSessionPool`: a front end handing back the code it collected
+  earlier). Both end as the usual `authentication` / `totp_required`, cached
+  in the session like the no-prompt case. So does a prompt that raises (a
+  cancelled dialog), before the exception propagates, so the account's other
+  connections and concurrent runs don't sign in and ask again.
 - **Long-lived clients and saved sessions (#29).** A client with a prompt
   drops a cached `totp_required` at the start of each run
   (`SaasSessionPool.forget_unanswered_challenges`), so a challenge declined
   in one run is asked again in the next instead of until the client is
   rebuilt; within a run it is asked once. It never counted toward the lock.
-  A rejected code (`mfa_mismatch`) did, and stays cached like any rejection.
+  Only a challenge no code answered is dropped (`SaasSession.challenge_unanswered`;
+  `sign_in()` follows the same rule): once a code was sent, any refusal,
+  `mfa_mismatch` or even another `totp_required`, counted, and stays cached
+  like any rejection.
   A saved session that is still usable is adopted without any prompt; a
   prompt is reached only when a real sign-in is needed (no usable saved
   session, or the renewal sign-in in the refresh token's last hour, where a
