@@ -114,6 +114,7 @@ def test_error_kinds_are_the_designed_set() -> None:
         "http",
         "response_format",
         "unsupported_feature",
+        "config",
     )
 
 

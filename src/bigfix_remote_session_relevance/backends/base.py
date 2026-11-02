@@ -9,14 +9,17 @@ transport failures to `ResultError`, and stamping result metadata.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
+import math
 import re
 import ssl
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, Self, TypeVar
 
 import certifi
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from ..config import ConnectionConfig
+    from ..prompts import Prompt
     from ..secrets import SecretStore
 
 log = logging.getLogger(__name__)
@@ -210,6 +214,40 @@ class _ClientCertError(Exception):
     pass
 
 
+# -- per-call read timeout ------------------------------------------------------------
+
+# One call's read timeout (``evaluate(read_timeout=)``). A context variable,
+# so concurrent calls on one backend (and one HTTP client) each keep their
+# own, and work started elsewhere (deployment discovery) keeps the configured
+# one.
+_CALL_READ_TIMEOUT: ContextVar[float | None] = ContextVar("bfrsr_read_timeout", default=None)
+
+
+def check_read_timeout(seconds: float | None) -> float | None:
+    """``seconds`` if it is a usable read timeout (or None); else ValueError."""
+    if seconds is None:
+        return None
+    if isinstance(seconds, bool) or not isinstance(seconds, int | float):
+        raise TypeError(f"read_timeout must be a number of seconds, not {seconds!r}")
+    if not (seconds > 0 and math.isfinite(seconds)):
+        raise ValueError(f"read_timeout must be a positive number of seconds, not {seconds!r}")
+    return float(seconds)
+
+
+@contextlib.contextmanager
+def call_read_timeout(seconds: float | None) -> Iterator[None]:
+    """Every request made inside uses this read timeout; None changes nothing."""
+    checked = check_read_timeout(seconds)
+    if checked is None:
+        yield
+        return
+    token = _CALL_READ_TIMEOUT.set(checked)
+    try:
+        yield
+    finally:
+        _CALL_READ_TIMEOUT.reset(token)
+
+
 # -- the base class -----------------------------------------------------------------
 
 Operation = Callable[[httpx.AsyncClient], Awaitable[SessionRelevanceResult]]
@@ -288,7 +326,7 @@ class Backend(ABC):
         conn: ConnectionConfig,
         *,
         trust: TrustPolicy | None = None,
-        prompt: Callable[[str], str] | None = None,
+        prompt: Prompt | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         secrets: SecretStore | None = DEFAULT_SECRET_STORE,
         save_prompted: Callable[[str], bool] | None = None,
@@ -299,14 +337,59 @@ class Backend(ABC):
         (default `default_secret_store()`, None for none). ``save_prompted``:
         asked with the store's name whether to save a prompted password there;
         it is written once a response shows the server accepted it.
+
+        ``prompt`` asks for a missing password here, so it must answer at
+        once; an async one raises `TypeError` if a password is needed (use
+        `afrom_config`). It is also the BigFix SaaS TOTP prompt, which may be
+        async either way: it is awaited during sign-in.
         """
+        address = cls._address_from_config(conn)  # a bad server raises before any prompt
         password, offer = (
             conn._resolve_password_and_store(prompt=prompt, secrets=secrets)
             if conn.auth == "basic"
             else (None, None)
         )
+        return cls._built(
+            conn, address, password, offer, trust, prompt, transport, secrets, save_prompted
+        )
+
+    @classmethod
+    async def afrom_config(
+        cls,
+        conn: ConnectionConfig,
+        *,
+        trust: TrustPolicy | None = None,
+        prompt: Prompt | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+        save_prompted: Callable[[str], bool] | None = None,
+    ) -> Self:
+        """`from_config`, awaiting ``prompt`` if it is async (a GUI dialog)."""
+        address = cls._address_from_config(conn)  # a bad server raises before any prompt
+        password, offer = (
+            await conn._aresolve_password_and_store(prompt=prompt, secrets=secrets)
+            if conn.auth == "basic"
+            else (None, None)
+        )
+        return cls._built(
+            conn, address, password, offer, trust, prompt, transport, secrets, save_prompted
+        )
+
+    @classmethod
+    def _built(
+        cls,
+        conn: ConnectionConfig,
+        address: ServerAddress,
+        password: str | None,
+        offer: SecretStore | None,
+        trust: TrustPolicy | None,
+        prompt: Prompt | None,
+        transport: httpx.AsyncBaseTransport | None,
+        secrets: SecretStore | None,
+        save_prompted: Callable[[str], bool] | None,
+    ) -> Self:
         backend = cls(
-            conn.address,
+            address,
             username=conn.username,
             password=password,
             token=conn.resolve_token(),
@@ -334,10 +417,15 @@ class Backend(ABC):
         return backend
 
     @classmethod
+    def _address_from_config(cls, conn: ConnectionConfig) -> ServerAddress:
+        """The connection's server; `ConfigError` if this backend can't use it."""
+        return conn.address
+
+    @classmethod
     def _config_kwargs(
         cls,
         conn: ConnectionConfig,
-        prompt: Callable[[str], str] | None,
+        prompt: Prompt | None,
         secrets: SecretStore | None,
     ) -> dict[str, Any]:
         """Backend-specific constructor arguments taken from the config."""
@@ -377,11 +465,18 @@ class Backend(ABC):
 
     # -- public API -----------------------------------------------------------------
 
-    async def evaluate(self, session_relevance: str) -> SessionRelevanceResult:
-        """Evaluate plain session relevance. Never raises for per-query failures."""
-        return await self._run(
-            session_relevance, lambda client: self._evaluate(client, session_relevance)
-        )
+    async def evaluate(
+        self, session_relevance: str, *, read_timeout: float | None = None
+    ) -> SessionRelevanceResult:
+        """Evaluate plain session relevance. Never raises for per-query failures.
+
+        ``read_timeout`` replaces the configured read timeout for every
+        request this call makes (a BigFix SaaS sign-in included).
+        """
+        with call_read_timeout(read_timeout):
+            return await self._run(
+                session_relevance, lambda client: self._evaluate(client, session_relevance)
+            )
 
     @abstractmethod
     async def _evaluate(
@@ -492,8 +587,17 @@ class Backend(ABC):
                 auth=self._basic_auth(),
                 headers=self._request_headers(),
                 follow_redirects=False,
+                event_hooks={"request": [self._apply_call_read_timeout]},
             )
         return self._client
+
+    async def _apply_call_read_timeout(self, request: httpx.Request) -> None:
+        read = _CALL_READ_TIMEOUT.get()
+        if read is not None:
+            # As the constructor's read_timeout: read, write and pool; the
+            # connect timeout stays the configured one.
+            timeout = httpx.Timeout(read, connect=self.timeout.connect)
+            request.extensions["timeout"] = timeout.as_dict()
 
     async def _run(self, session_relevance: str, operation: Operation) -> SessionRelevanceResult:
         start = time.perf_counter()

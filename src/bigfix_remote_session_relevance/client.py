@@ -9,6 +9,10 @@ and never around a changed pinned certificate (a security signal).
 
 Mode ``all`` queries every enabled connection and returns each result.
 
+A connection whose backend cannot be built from its settings (a server with
+a path, say, as ``BES_ROOT_SERVER`` can give) is one ``config`` result of its
+own, every run, and the others still run.
+
 The ``*_stream`` methods yield the same results in completion order, each
 the moment it lands, so one slow deployment does not hold up the others.
 """
@@ -22,9 +26,9 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 
 import httpx
 
-from .backends.base import Backend, TrustPolicy
+from .backends.base import Backend, TrustPolicy, call_read_timeout, check_read_timeout
 from .backends.explorer_extras import explorer_body, supports_explorer_extras
-from .backends.registry import BACKEND_CLASSES, backend_from_config
+from .backends.registry import BACKEND_CLASSES, abackend_from_config
 from .backends.saas import SaasBackend, SaasSessionPool
 from .config import (
     Config,
@@ -36,6 +40,7 @@ from .config import (
 from .deployment import discover_deployment_id, group_key
 from .escapes import escape_result
 from .exceptions import ConfigError
+from .prompts import Prompt, ask
 from .result import ResultError, SessionRelevanceResult
 from .results import SessionRelevanceResults
 from .secrets import DEFAULT_SECRET_STORE, SecretStore
@@ -81,7 +86,7 @@ class AsyncSessionRelevanceClient:
         connections: Iterable[str] | None = None,
         backends: Iterable[str] | None = None,
         trust: TrustPolicy | _Default | None = _DEFAULT_TRUST,
-        prompt: Callable[[str], str] | None = None,
+        prompt: Prompt | None = None,
         max_concurrency: int = 16,
         raise_errors: bool = False,
         discover: bool = True,
@@ -101,7 +106,10 @@ class AsyncSessionRelevanceClient:
         self.raise_errors = raise_errors
         self.discover = discover
         self.record_deployment_ids = record_deployment_ids
+        # Passwords and BigFix SaaS TOTP codes; sync, or async (a GUI dialog).
         self._prompt = prompt
+        self._prompt_lock: asyncio.Lock | None = None
+        self._build_lock: asyncio.Lock | None = None
         # password_store = "system" passwords: where they are read, and
         # whether a prompted one is saved there (asked with the store's name).
         self._secrets = secrets
@@ -126,6 +134,8 @@ class AsyncSessionRelevanceClient:
         self._connections = selected
         self._deployment_ids: dict[str, str | None] = {c.name: c.deployment_id for c in selected}
         self._backends: dict[str, Backend] = {}
+        # Connections whose backend could not be built: a result each, every run.
+        self._config_problems: list[tuple[ConnectionConfig, ResultError]] = []
         # BigFix SaaS connections of one account share one sign-in: --setup
         # saves one per server, and failed logins lock the account for good.
         self._saas_sessions = SaasSessionPool()
@@ -157,7 +167,11 @@ class AsyncSessionRelevanceClient:
     # -- public API -----------------------------------------------------------------
 
     async def evaluate(
-        self, session_relevance: str, *, unescape: bool = True
+        self,
+        session_relevance: str,
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> SessionRelevanceResults:
         """Plain session relevance on every deployment (or connection, in ``all`` mode).
 
@@ -165,30 +179,49 @@ class AsyncSessionRelevanceClient:
         ``unescape=False`` every string in them is escaped instead
         (`escape_answer`: ``%`` and control characters as ``%xx``, Web
         Reports' and qna's form), the same way whichever backend answered.
+
+        ``read_timeout`` (seconds) replaces each connection's configured read
+        timeout for this call only, so one long-lived client serves runs with
+        different timeouts. It bounds each request the query makes (a BigFix
+        SaaS sign-in included), not deployment discovery; connect timeouts
+        stay the configured ones. Not positive raises `ValueError`.
         """
-        call = self._plain(session_relevance, unescape)
+        call = self._plain(session_relevance, unescape, check_read_timeout(read_timeout))
         return await self._collect(
             self._stream(session_relevance, call, capable=None, streaming=False)
         )
 
     def evaluate_stream(
-        self, session_relevance: str, *, unescape: bool = True
+        self,
+        session_relevance: str,
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate`, yielding each result as it lands (completion order).
 
         Abandoning the iteration early (``break``, or ``aclose()``) cancels
         the queries still running. With ``raise_errors`` it raises at the
-        first failed result.
+        first failed result. A bad ``read_timeout`` raises here, at the call.
         """
-        return self._stream(
-            session_relevance, self._plain(session_relevance, unescape), capable=None
-        )
+        call = self._plain(session_relevance, unescape, check_read_timeout(read_timeout))
+        return self._stream(session_relevance, call, capable=None)
 
     async def evaluate_many(
-        self, session_relevances: Iterable[str], *, unescape: bool = True
+        self,
+        session_relevances: Iterable[str],
+        *,
+        unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> list[SessionRelevanceResults]:
+        check_read_timeout(read_timeout)
         return list(
-            await asyncio.gather(*(self.evaluate(r, unescape=unescape) for r in session_relevances))
+            await asyncio.gather(
+                *(
+                    self.evaluate(r, unescape=unescape, read_timeout=read_timeout)
+                    for r in session_relevances
+                )
+            )
         )
 
     async def evaluate_explorer(
@@ -198,9 +231,15 @@ class AsyncSessionRelevanceClient:
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
         unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> SessionRelevanceResults:
-        """Additive Explorer extras, on connections that can reach Explorer only."""
-        call = self._explorer(session_relevance, keys, filters, unescape)
+        """Additive Explorer extras, on connections that can reach Explorer only.
+
+        ``read_timeout`` is `evaluate`'s.
+        """
+        call = self._explorer(
+            session_relevance, keys, filters, unescape, check_read_timeout(read_timeout)
+        )
         return await self._collect(
             self._stream(session_relevance, call, capable=supports_explorer_extras, streaming=False)
         )
@@ -212,29 +251,33 @@ class AsyncSessionRelevanceClient:
         keys: str | None = None,
         filters: Mapping[str, str] | None = None,
         unescape: bool = True,
+        read_timeout: float | None = None,
     ) -> AsyncGenerator[SessionRelevanceResult]:
         """`evaluate_explorer`, yielding each result as it lands. Invalid
-        keys or filters raise here, before anything is queried."""
-        call = self._explorer(session_relevance, keys, filters, unescape)
+        keys, filters or ``read_timeout`` raise here, before anything is queried."""
+        call = self._explorer(
+            session_relevance, keys, filters, unescape, check_read_timeout(read_timeout)
+        )
         return self._stream(session_relevance, call, capable=supports_explorer_extras)
 
     def result_count(self) -> int | None:
         """How many results an evaluation returns: one per deployment, or per
         connection in ``all`` mode. ``None`` while that still depends on
         deployment ids not discovered yet (the first evaluation finds them),
-        or on whether the automatic local root server connection works."""
+        or on whether the automatic local root server connection works.
+        A connection with a config problem is one result of its own."""
         if not self._local_settled and self._droppable_local():
             return None
+        problems = len(self._config_problems)
         if self.mode == "all":
-            return len(self._connections)
+            return len(self._connections) + problems
         if self._discovery_pending():
             return None
-        return len(self._groups())
+        return len(self._groups()) + problems
 
     async def discover_deployments(self, *, force: bool = False) -> dict[str, str | None]:
         """Ask every selected connection for its deployment id (and record it)."""
-        self._ensure_backends()
-        await self._settle_local_credentials()
+        await self._start_run()
         targets = [c for c in self._connections if force or not self._deployment_ids[c.name]]
         await self._discover_for(targets)
         self._discovered = True
@@ -242,24 +285,62 @@ class AsyncSessionRelevanceClient:
 
     # -- machinery ----------------------------------------------------------------------
 
-    def _ensure_backends(self) -> None:
+    async def _start_run(self) -> None:
+        await self._ensure_backends()
+        await self._settle_local_credentials()
+        if self._prompt is not None:
+            # A TOTP challenge declined last run is asked again in this one.
+            self._saas_sessions.forget_unanswered_challenges()
+
+    async def _ask(self, message: str) -> str | None:
+        """The caller's prompt, one question at a time.
+
+        Across connections and accounts: two dialogs at once (or two
+        questions on one terminal) would interleave. A sync prompt blocks
+        the loop as it always did; an async one is awaited.
+        """
+        if self._prompt_lock is None:
+            self._prompt_lock = asyncio.Lock()
+        async with self._prompt_lock:
+            return await ask(self._prompt, message)
+
+    async def _ensure_backends(self) -> None:
         # Built sequentially (not inside the fan-out) so interactive password
-        # prompts happen one at a time.
-        for conn in self._connections:
-            if conn.name not in self._backends:
-                transport = self._transport_factory(conn) if self._transport_factory else None
-                backend = backend_from_config(
-                    conn,
-                    trust=self._trust,
-                    prompt=self._prompt,
-                    transport=transport,
-                    secrets=self._secrets,
-                    save_prompted=self._save_prompted,
-                )
-                backend.deployment_id = self._deployment_ids[conn.name]
-                if isinstance(backend, SaasBackend):
-                    self._saas_sessions.attach(backend)
-                self._backends[conn.name] = backend
+        # prompts happen one at a time, and under a lock, so concurrent runs
+        # on one client (evaluate_many) build and ask for each connection once.
+        if all(c.name in self._backends for c in self._connections):
+            return
+        if self._build_lock is None:
+            self._build_lock = asyncio.Lock()
+        async with self._build_lock:
+            for conn in list(self._connections):
+                if conn.name not in self._backends:
+                    await self._build(conn)
+
+    async def _build(self, conn: ConnectionConfig) -> None:
+        transport = self._transport_factory(conn) if self._transport_factory else None
+        try:
+            backend = await abackend_from_config(
+                conn,
+                trust=self._trust,
+                prompt=None if self._prompt is None else self._ask,
+                transport=transport,
+                secrets=self._secrets,
+                save_prompted=self._save_prompted,
+            )
+        except ConfigError as exc:
+            # Some mistakes show only when the backend is built (a
+            # BES_ROOT_SERVER with a path): a result for this connection,
+            # not an exception in the middle of everyone's stream.
+            log.warning("%s: not used: %s", conn.name, exc)
+            problem = ResultError(kind="config", backend=conn.backend, message=str(exc))
+            self._config_problems.append((conn, problem))
+            self._connections.remove(conn)
+            return
+        backend.deployment_id = self._deployment_ids[conn.name]
+        if isinstance(backend, SaasBackend):
+            self._saas_sessions.attach(backend)
+        self._backends[conn.name] = backend
 
     def _droppable_local(self) -> list[ConnectionConfig]:
         """Automatic local root server connections, when something else is selected."""
@@ -369,9 +450,11 @@ class AsyncSessionRelevanceClient:
 
     @staticmethod
     def _plain(
-        session_relevance: str, unescape: bool
+        session_relevance: str, unescape: bool, read_timeout: float | None = None
     ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
-        return _escaped(lambda backend: backend.evaluate(session_relevance), unescape)
+        return _timed(
+            _escaped(lambda backend: backend.evaluate(session_relevance), unescape), read_timeout
+        )
 
     @staticmethod
     def _explorer(
@@ -379,6 +462,7 @@ class AsyncSessionRelevanceClient:
         keys: str | None,
         filters: Mapping[str, str] | None,
         unescape: bool,
+        read_timeout: float | None = None,
     ) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
         explorer_body(session_relevance, keys, filters)  # validate once, up front
 
@@ -387,7 +471,7 @@ class AsyncSessionRelevanceClient:
                 session_relevance, keys=keys, filters=filters
             )
 
-        return _escaped(call, unescape)
+        return _timed(_escaped(call, unescape), read_timeout)
 
     async def _collect(
         self, stream: AsyncIterator[SessionRelevanceResult]
@@ -418,8 +502,7 @@ class AsyncSessionRelevanceClient:
         connections still being discovered wait for discovery, so one
         unreachable, undiscovered server does not hold up the rest.
         """
-        self._ensure_backends()
-        await self._settle_local_credentials()
+        await self._start_run()
         finished: asyncio.Queue[asyncio.Future[SessionRelevanceResult | None]] = asyncio.Queue()
         running: set[asyncio.Future[SessionRelevanceResult | None]] = set()
         helpers: list[asyncio.Future[None]] = []
@@ -462,6 +545,9 @@ class AsyncSessionRelevanceClient:
                         spawn(group(key, members, None))
 
             spawn(discovered_groups())
+
+        for conn, problem in self._config_problems:
+            spawn(self._config_problem(session_relevance, conn, problem))
 
         try:
             while running:
@@ -525,6 +611,18 @@ class AsyncSessionRelevanceClient:
             return await self._unsupported(session_relevance, members)
         return _summarize(attempts)
 
+    @staticmethod
+    async def _config_problem(
+        session_relevance: str, conn: ConnectionConfig, problem: ResultError
+    ) -> SessionRelevanceResult:
+        return SessionRelevanceResult.failure(
+            session_relevance,
+            problem,
+            connection=conn.name,
+            deployment_id=conn.deployment_id,
+            backend=conn.backend,
+        )
+
     async def _unsupported(
         self, session_relevance: str, members: list[ConnectionConfig]
     ) -> SessionRelevanceResult:
@@ -558,6 +656,21 @@ def _escaped(
         return escape_result(await call(backend))
 
     return escaping
+
+
+def _timed(
+    call: Callable[[Backend], Awaitable[SessionRelevanceResult]], read_timeout: float | None
+) -> Callable[[Backend], Awaitable[SessionRelevanceResult]]:
+    # Set inside the task that runs the query, so it reaches only this
+    # call's requests: not discovery, nor another call running meanwhile.
+    if read_timeout is None:
+        return call
+
+    async def timed(backend: Backend) -> SessionRelevanceResult:
+        with call_read_timeout(read_timeout):
+            return await call(backend)
+
+    return timed
 
 
 def _summarize(attempts: list[SessionRelevanceResult]) -> SessionRelevanceResult:

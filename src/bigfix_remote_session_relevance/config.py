@@ -16,7 +16,7 @@ import re
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +31,7 @@ from .deployment import is_deployment_id
 from .exceptions import ConfigError
 from .local_root_server import LOCAL_ROOT_SERVER
 from .paths import data_dir
+from .prompts import Prompt, answer_now, ask
 from .secrets import DEFAULT_SECRET_STORE
 from .server_address import DEFAULT_PORTS, ServerAddress, normalize_server, saas_api_address
 
@@ -51,6 +52,7 @@ _LOCAL_SERVER_PLACEHOLDER = "localhost"
 _LOCAL_LABEL = "local root server"
 # password_store values. "system": this machine's OS store (secrets.py).
 PASSWORD_STORE_SYSTEM = "system"  # noqa: S105 - a setting, not a secret
+_ASYNC_PROMPT_USE = "aresolve_password (or Backend.afrom_config / abackend_from_config)"
 
 _BACKEND_ALIASES = {
     "rest": "rest",
@@ -179,7 +181,7 @@ class ConnectionConfig:
     def resolve_password(
         self,
         *,
-        prompt: Callable[[str], str] | None = None,
+        prompt: Prompt | None = None,
         secrets: SecretStore | None = DEFAULT_SECRET_STORE,
     ) -> str | None:
         """``password_env`` if set, else inline ``password``, else the store, else ``prompt``.
@@ -187,7 +189,8 @@ class ConnectionConfig:
         The store is read only with ``password_store = "system"``: ``secrets``,
         by default `default_secret_store()`; None means none. A missing or
         empty store, or any error from it, falls through to the prompt.
-        Nothing is ever written to the store here.
+        Nothing is ever written to the store here. ``prompt`` must answer at
+        once (an async one raises `TypeError`: use `aresolve_password`).
         """
         # The no-store paths inline: this runs for every backend built.
         if self.password_env:
@@ -199,13 +202,22 @@ class ConnectionConfig:
         if self.password_store is None:
             if prompt is None or self.username is None:
                 return None
-            return prompt(f"Password for {self.username} on {self.name}: ")
+            return answer_now(prompt, self._password_question(), use=_ASYNC_PROMPT_USE)
         return self._resolve_password_and_store(prompt=prompt, secrets=secrets)[0]
+
+    async def aresolve_password(
+        self,
+        *,
+        prompt: Prompt | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+    ) -> str | None:
+        """`resolve_password`, awaiting ``prompt`` if it is async (a GUI dialog)."""
+        return (await self._aresolve_password_and_store(prompt=prompt, secrets=secrets))[0]
 
     def _resolve_password_and_store(
         self,
         *,
-        prompt: Callable[[str], str] | None = None,
+        prompt: Prompt | None = None,
         secrets: SecretStore | None = DEFAULT_SECRET_STORE,
     ) -> tuple[str | None, SecretStore | None]:
         """`resolve_password`, plus the store a prompted password could be saved in (for from_config).
@@ -214,6 +226,33 @@ class ConnectionConfig:
         and the store is usable (it answered, without an entry). Saving it
         is the caller's choice, best made once the server has accepted it.
         """
+        found, store = self._stored_password(secrets)
+        if found is not None or prompt is None or self.username is None:
+            return found, None
+        answer = answer_now(prompt, self._password_question(), use=_ASYNC_PROMPT_USE)
+        return answer, store if answer else None
+
+    async def _aresolve_password_and_store(
+        self,
+        *,
+        prompt: Prompt | None = None,
+        secrets: SecretStore | None = DEFAULT_SECRET_STORE,
+    ) -> tuple[str | None, SecretStore | None]:
+        """`_resolve_password_and_store`, awaiting an async ``prompt``."""
+        found, store = self._stored_password(secrets)
+        if found is not None or prompt is None or self.username is None:
+            return found, None
+        answer = await ask(prompt, self._password_question())
+        return answer, store if answer else None
+
+    def _password_question(self) -> str:
+        return f"Password for {self.username} on {self.name}: "
+
+    def _stored_password(
+        self, secrets: SecretStore | None
+    ) -> tuple[str | None, SecretStore | None]:
+        """The password from the environment, the config or the store, if any;
+        else None and the store a prompted one could be saved in."""
         if self.password_env:
             value = os.environ.get(self.password_env)
             if value:
@@ -235,15 +274,11 @@ class ConnectionConfig:
                     store.name,
                     type(exc).__name__,
                 )
-                store = None  # nor offered for saving: it just failed
-            else:
-                if found:
-                    return found, None
-                log.debug("%s: no password in %s; falling back", self.name, store.name)
-        if prompt is None or self.username is None:
-            return None, None
-        answer = prompt(f"Password for {self.username} on {self.name}: ")
-        return answer, store if answer else None
+                return None, None  # nor offered for saving: it just failed
+            if found:
+                return found, None
+            log.debug("%s: no password in %s; falling back", self.name, store.name)
+        return None, store
 
     def _secret_store(self, secrets_arg: SecretStore | None) -> SecretStore | None:
         if self.password_store != PASSWORD_STORE_SYSTEM:
@@ -284,6 +319,28 @@ class Config:
             if c.name == name:
                 return c
         raise ConfigError(f"no connection named {name!r}")
+
+    def with_timeouts(self, *, connect: float | None = None, read: float | None = None) -> Config:
+        """A copy with every connection's connect and/or read timeout replaced.
+
+        None keeps each connection's own (or the ``[defaults]``) value; with
+        both None this is the same config. The CLI's ``--connect-timeout`` /
+        ``--timeout``. For one call's read timeout on a long-lived client,
+        pass ``read_timeout=`` to ``evaluate`` instead.
+        """
+        if connect is None and read is None:
+            return self
+        return dataclasses.replace(
+            self,
+            connections=tuple(
+                dataclasses.replace(
+                    c,
+                    connect_timeout=c.connect_timeout if connect is None else connect,
+                    read_timeout=c.read_timeout if read is None else read,
+                )
+                for c in self.connections
+            ),
+        )
 
 
 # -- loading ------------------------------------------------------------------

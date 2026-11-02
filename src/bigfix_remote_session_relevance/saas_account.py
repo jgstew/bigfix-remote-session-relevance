@@ -16,6 +16,7 @@ import httpx
 
 from .backends.saas import SaasBackend, SaasSessionPool
 from .config import ConnectionConfig
+from .prompts import Prompt
 from .result import ResultError
 from .server_address import normalize_server, saas_api_address
 
@@ -76,7 +77,7 @@ async def saas_sign_in(
     password: str,
     *,
     totp: str | None = None,
-    prompt: Callable[[str], str] | None = None,
+    prompt: Prompt | None = None,
     pool: SaasSessionPool | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> SaasAccount:
@@ -86,9 +87,10 @@ async def saas_sign_in(
     already has; ``prompt`` asks for one only if challenged. With neither, an
     MFA account comes back as ``authentication`` / ``totp_required``, so a
     front end can ask for the code and call again (with the same ``pool``
-    too: a pending challenge is not kept as a rejection). ``prompt`` is
-    called synchronously, on the event loop, and whatever it raises (a
-    cancelled dialog, say) propagates (async prompts are not supported yet). ``pool``:
+    too: a pending challenge is not kept as a rejection). ``prompt`` may be
+    async (a dialog, awaited on the event loop) or answer at once; None or
+    an empty answer declines and no code is sent. Whatever it raises (a
+    cancelled dialog, say) propagates. ``pool``:
     backends later attached to the same `SaasSessionPool` reuse this sign-in,
     and a rejected one (a wrong password or TOTP code) is never sent again
     through it. ``email`` is stripped.
@@ -134,7 +136,7 @@ def new_saas_backend(
     email: str,
     password: str,
     *,
-    totp_prompt: Callable[[str], str] | None = None,
+    totp_prompt: Prompt | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     reuse_saved_session: bool = True,
 ) -> SaasBackend:
